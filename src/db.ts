@@ -24,6 +24,24 @@ function resolveDataDir(): string {
   return DATA_DIR;
 }
 
+/**
+ * Convert arbitrary free text (often an error message) into a safe FTS5 MATCH
+ * query. Raw user input frequently contains FTS5 operators/special characters
+ * (`()`, `:`, `-`, `*`, `"`, bareword AND/OR/NOT, column-like tokens) which
+ * otherwise raise "fts5: syntax error" / "no such column" and fail the search.
+ * We tokenize to alphanumerics, quote each token as a literal phrase, and OR
+ * them for fuzzy recall (bm25 rank still orders by how many tokens matched).
+ * Returns null when there is nothing searchable.
+ */
+export function toFtsQuery(input: string): string | null {
+  const tokens = (input ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/i)
+    .filter((t) => t.length >= 2);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"`).join(" OR ");
+}
+
 let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
@@ -113,6 +131,9 @@ export function searchMemories(query: string, filters?: {
   const db = getDb();
   const limit = filters?.limit ?? 10;
 
+  const ftsQuery = toFtsQuery(query);
+  if (ftsQuery === null) return [];
+
   const conditions: string[] = [];
   const params: Record<string, string | number> = {};
 
@@ -148,7 +169,7 @@ export function searchMemories(query: string, filters?: {
     LIMIT :limit
   `;
 
-  params.query = query;
+  params.query = ftsQuery;
   params.limit = limit;
 
   return db.prepare(sql).all(params) as MemoryEntry[];
@@ -179,7 +200,8 @@ export function getContextMemories(areas: string[], taskDescription?: string, pr
   const criticalResults = db.prepare(criticalSql).all(criticalParams) as MemoryEntry[];
   results.push(...criticalResults);
 
-  if (taskDescription) {
+  const ftsQuery = taskDescription ? toFtsQuery(taskDescription) : null;
+  if (ftsQuery) {
     try {
       const ftsSql = `
         SELECT m.* FROM memories m
@@ -190,7 +212,7 @@ export function getContextMemories(areas: string[], taskDescription?: string, pr
         LIMIT 10
       `;
 
-      const ftsParams: Record<string, string> = { query: taskDescription };
+      const ftsParams: Record<string, string> = { query: ftsQuery };
       if (project) ftsParams.project = project;
 
       const ftsResults = db.prepare(ftsSql).all(ftsParams) as MemoryEntry[];

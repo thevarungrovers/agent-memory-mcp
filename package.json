@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "prepare": "tsup",
     "setup": "tsx src/setup.ts",
     "postbuild": "echo '\n Run \"npm run setup\" to configure storage (local or Google Drive backup).\n'",
     "dev": "tsx src/index.ts",
