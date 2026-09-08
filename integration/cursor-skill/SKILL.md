@@ -59,6 +59,32 @@ Call `update_memory` if you discover the fix was incomplete or wrong:
 update_memory({ id: "abc-123", fix: "Updated fix with additional edge case handling" })
 ```
 
+### At the end of every session
+
+Call `store_session_log` with what you worked on. This is a SEPARATE concern from
+`store_memory`: memories are reusable lessons, the work log is the chronological record
+of what happened. Log every session, including ones that produced no memory at all.
+
+```
+store_session_log({
+  summary: "Migrated the order controller to Yii2 and fixed the vite manifest path",
+  project: "lufa-development-yii2",
+  tags: "yii2,vite,orders"
+})
+```
+
+### When asked when past work happened
+
+Call `search_session_log` instead of guessing from git history:
+
+```
+search_session_log({ query: "vite manifest" })                      // when did I work on X?
+search_session_log({ from: "2026-09-01", to: "2026-09-07" })        // what did I do last week?
+search_session_log({ query: "orders", project: "lufa-development-yii2" })
+```
+
+Results come back grouped by date, newest first.
+
 ## Rules
 
 1. Always search before attempting a fix for any non-trivial error
@@ -67,6 +93,8 @@ update_memory({ id: "abc-123", fix: "Updated fix with additional edge case handl
 4. Use specific, searchable `tags` -- prefer `vue,vuetify,v-select` over `frontend`
 5. Set `severity` to `critical` for bugs that cause data loss or security issues
 6. Set `project` only for project-specific issues; omit for general knowledge
+7. Always call `store_session_log` before finishing, even when there is no memory to store
+8. Never rewrite an existing work-log row -- the log is append-only, one row per session
 
 ## Good Memory Entry Checklist
 

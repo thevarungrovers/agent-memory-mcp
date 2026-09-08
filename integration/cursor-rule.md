@@ -18,3 +18,12 @@ You have access to an `agent-memory` MCP server with tools for persistent knowle
 **After fixing a bug or discovering a pitfall:**
 1. Call `store_memory` with title, type, area, symptom, fix, and tags
 2. Include the exact error message in `symptom` so future searches match
+
+**At the end of every session:**
+1. Call `store_session_log` with a 1-3 sentence `summary` of what you worked on, plus `project` and `tags`
+2. Do this on EVERY session, including sessions where nothing was worth a `store_memory`
+3. Name the feature, bug, ticket, or files in the summary so a keyword search finds it months later
+
+**When asked when past work happened:**
+1. Call `search_session_log` — a keyword for "when did I work on X?", a `from`/`to` range for "what did I do last week?"
+2. Do not guess from the repo or git history; the work log is the record

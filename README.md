@@ -177,9 +177,58 @@ Remove an obsolete entry.
 | --------- | -------- | ----------------------- |
 | id        | Yes      | The memory ID to delete |
 
+### store_session_log
+
+Append one session to the daily work log. See [Daily Work Log](#daily-work-log).
+
+| Parameter | Required | Description                                                                |
+| --------- | -------- | -------------------------------------------------------------------------- |
+| summary   | Yes      | What was worked on, in 1-3 sentences                                       |
+| project   | No       | Project or repo name (omit for cross-project work)                         |
+| work_date | No       | Local day `YYYY-MM-DD`. Defaults to today; pass only to backfill an earlier day |
+| tags      | No       | Comma-separated tags for search                                            |
+
+### search_session_log
+
+Search the daily work log. Results are grouped by date, newest first.
+
+| Parameter | Required | Description                                                       |
+| --------- | -------- | ----------------------------------------------------------------- |
+| query     | No       | Free-text keyword. Omit to list every session in the date range   |
+| from      | No       | Earliest local date `YYYY-MM-DD` (inclusive)                      |
+| to        | No       | Latest local date `YYYY-MM-DD` (inclusive)                        |
+| project   | No       | Filter by project or repo name                                    |
+| limit     | No       | Max sessions (default 20)                                         |
+
+## Daily Work Log
+
+Separate from the memory entries above, the server keeps a chronological log of what
+was worked on, so you can later ask "when did I work on X?" or "what did I do last week?"
+without reading everything.
+
+It is deliberately a different concern from `store_memory`:
+
+|                | `memories`                             | `session_log`                       |
+| -------------- | -------------------------------------- | ----------------------------------- |
+| Answers        | "has this bug been seen before?"       | "when did I work on X?"             |
+| Written        | when something reusable is learned     | once at the end of every session    |
+| Shape          | one row per lesson, amendable          | append-only, one row per session    |
+| Search index   | `memories_fts`                         | `session_log_fts` (separate)        |
+
+The two FTS indexes are kept apart on purpose — work-log prose would otherwise
+dilute every `search_memory` result.
+
+Many short sessions in one day is the expected shape. Nothing is ever read then
+rewritten: each session appends its own row, and rows are grouped by date at query
+time. `work_date` is stored as a **local** calendar day (`date('now','localtime')`)
+rather than derived from the UTC `created_at`, so an evening session is filed under
+the day you actually worked, not the next one.
+
 ## Database
 
-Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5).
+Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5). Two independent
+tables live there: `memories` (indexed by `memories_fts`) and `session_log`
+(indexed by `session_log_fts`).
 
 ### Storage Setup
 
@@ -221,6 +270,14 @@ SELECT * FROM memories WHERE id IN (
 
 -- Count by area
 SELECT area, COUNT(*) FROM memories GROUP BY area;
+
+-- Sessions per day, most recent first
+SELECT work_date, COUNT(*) FROM session_log GROUP BY work_date ORDER BY work_date DESC;
+
+-- When did I work on X?
+SELECT s.work_date, s.project, s.summary FROM session_log s
+  JOIN session_log_fts f ON s.rowid = f.rowid
+  WHERE session_log_fts MATCH 'vite' ORDER BY s.work_date DESC;
 ```
 
 ### Backup
