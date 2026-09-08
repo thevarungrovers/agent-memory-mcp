@@ -18,3 +18,12 @@ export interface MemoryEntry {
 export type MemoryType = "bug" | "pattern" | "gotcha" | "solution" | "learning";
 
 export type Severity = "critical" | "major" | "minor" | "info";
+
+export interface SessionLogEntry {
+  id: string;
+  work_date: string;
+  created_at: string;
+  project: string | null;
+  summary: string;
+  tags: string | null;
+}
