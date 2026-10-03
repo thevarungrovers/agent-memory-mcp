@@ -27,3 +27,21 @@ export interface SessionLogEntry {
   summary: string;
   tags: string | null;
 }
+
+export interface RuleEntry {
+  id: string;
+  rule: string;
+  mode: RuleMode;
+  project: string | null;
+  area: string | null;
+  rationale: string | null;
+  priority: RulePriority;
+  active: number;
+  tags: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RuleMode = "always" | "never" | "prefer" | "ask";
+
+export type RulePriority = "critical" | "high" | "normal";

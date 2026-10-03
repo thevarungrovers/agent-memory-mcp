@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryEntry, SessionLogEntry } from "./types.js";
+import type { MemoryEntry, RuleEntry, SessionLogEntry } from "./types.js";
 
 const DATA_DIR = join(homedir(), ".agent-memory");
 
@@ -150,6 +150,31 @@ function migrate(db: Database.Database): void {
       INSERT INTO session_log_fts(rowid, summary, project, tags)
       VALUES (new.rowid, new.summary, new.project, new.tags);
     END;
+  `);
+
+  // Standing instructions ("always/never/prefer X"), as opposed to memories, which are
+  // things learned. A rule is pushed into every session by the SessionStart hook rather
+  // than searched for, so it needs no FTS index: there are a dozen or so, they are read
+  // wholesale, and four shadow tables plus three sync triggers would buy nothing.
+  // UNIQUE over (rule, project) is an expression index because SQLite treats NULLs as
+  // distinct, which would otherwise let the same global rule be stored twice.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rules (
+      id TEXT PRIMARY KEY,
+      rule TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK(mode IN ('always', 'never', 'prefer', 'ask')),
+      project TEXT,
+      area TEXT,
+      rationale TEXT,
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('critical', 'high', 'normal')),
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+      tags TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS rules_unique_idx
+      ON rules(rule, COALESCE(project, ''));
   `);
 }
 
@@ -435,4 +460,125 @@ export function deleteSessionLog(id: string): boolean {
   const db = getDb();
   const result = db.prepare("DELETE FROM session_log WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+/** critical first, then high, then normal; stable by age within a band. */
+const RULE_ORDER = `ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, created_at ASC`;
+
+/**
+ * Returns null when an identical rule already exists for the same scope, rather
+ * than throwing: re-stating a rule you already hold is a no-op worth reporting,
+ * not an error worth failing the turn over.
+ */
+export function insertRule(entry: {
+  id: string;
+  rule: string;
+  mode: string;
+  project: string | null;
+  area: string | null;
+  rationale: string | null;
+  priority: string;
+  tags: string | null;
+}): RuleEntry | null {
+  const db = getDb();
+  try {
+    db.prepare(`
+      INSERT INTO rules (id, rule, mode, project, area, rationale, priority, tags)
+      VALUES (:id, :rule, :mode, :project, :area, :rationale, :priority, :tags)
+    `).run(entry);
+  } catch (error) {
+    if ((error as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") return null;
+    throw error;
+  }
+  return db.prepare("SELECT * FROM rules WHERE id = ?").get(entry.id) as RuleEntry;
+}
+
+/**
+ * The rules that apply right now: every active global rule, plus the active rules
+ * for this project. This is the one read the SessionStart hook and get_context both
+ * go through, so "what is in force" has a single definition.
+ */
+export function getActiveRules(project?: string | null): RuleEntry[] {
+  const db = getDb();
+  const sql = `
+    SELECT * FROM rules
+    WHERE active = 1
+    ${project ? "AND (project = :project OR project IS NULL)" : "AND project IS NULL"}
+    ${RULE_ORDER}
+  `;
+  const params = project ? { project } : {};
+  return db.prepare(sql).all(params) as RuleEntry[];
+}
+
+export function listRules(filters?: {
+  project?: string;
+  area?: string;
+  mode?: string;
+  priority?: string;
+  include_inactive?: boolean;
+  limit?: number;
+}): RuleEntry[] {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: Record<string, string | number> = {};
+
+  if (!filters?.include_inactive) {
+    conditions.push("active = 1");
+  }
+  if (filters?.project) {
+    conditions.push("(project = :project OR project IS NULL)");
+    params.project = filters.project;
+  }
+  if (filters?.area) {
+    conditions.push("area = :area");
+    params.area = filters.area;
+  }
+  if (filters?.mode) {
+    conditions.push("mode = :mode");
+    params.mode = filters.mode;
+  }
+  if (filters?.priority) {
+    conditions.push("priority = :priority");
+    params.priority = filters.priority;
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  params.limit = filters?.limit ?? 100;
+
+  return db.prepare(`
+    SELECT * FROM rules
+    ${whereClause}
+    ${RULE_ORDER}
+    LIMIT :limit
+  `).all(params) as RuleEntry[];
+}
+
+export function updateRule(id: string, updates: Partial<Omit<RuleEntry, "id" | "created_at">>): RuleEntry | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM rules WHERE id = ?").get(id) as RuleEntry | undefined;
+  if (!existing) return null;
+
+  const fields: string[] = [];
+  const params: Record<string, string | number | null> = { id };
+
+  const allowedFields = ["rule", "mode", "project", "area", "rationale", "priority", "active", "tags"] as const;
+
+  for (const field of allowedFields) {
+    if (updates[field] !== undefined) {
+      fields.push(`${field} = :${field}`);
+      params[field] = updates[field] as string | number | null;
+    }
+  }
+
+  if (fields.length === 0) return existing;
+
+  fields.push("updated_at = datetime('now')");
+  db.prepare(`UPDATE rules SET ${fields.join(", ")} WHERE id = :id`).run(params);
+
+  return db.prepare("SELECT * FROM rules WHERE id = ?").get(id) as RuleEntry;
+}
+
+export function deleteRule(id: string): boolean {
+  const db = getDb();
+  return db.prepare("DELETE FROM rules WHERE id = ?").run(id).changes > 0;
 }
