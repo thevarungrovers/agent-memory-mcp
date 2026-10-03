@@ -27,3 +27,14 @@ You have access to an `agent-memory` MCP server with tools for persistent knowle
 **When asked when past work happened:**
 1. Call `search_session_log` — a keyword for "when did I work on X?", a `from`/`to` range for "what did I do last week?"
 2. Do not guess from the repo or git history; the work log is the record
+
+**When the user states a standing preference ("always…", "never…", "prefer X over Y"):**
+1. Call `store_rule` the moment they say it, with `mode`, the `rule` itself, and the `rationale` if they gave one
+2. A rule is not a memory: a memory has a symptom you search for, a rule has none and is pushed to you by `get_context`
+3. Scope it with `project` when it only applies to one repo; leave it off for a rule that applies everywhere
+4. Do not store one-off instructions that only apply to the task in hand
+
+**The rules returned by `get_context` are instructions, not background:**
+1. Follow them for the whole session; a rule marked ASK means confirm before acting
+2. Change them only through `store_rule` / `update_rule` / `delete_rule`
+3. Never read or write `memory.db` directly with sqlite3 — the database belongs to the server

@@ -9,6 +9,10 @@ You have access to an `agent-memory` MCP server with these tools:
 - `delete_memory` — Remove an obsolete entry
 - `store_session_log` — Append what this session worked on to the daily work log
 - `search_session_log` — Search the work log by keyword and/or date range
+- `store_rule` — Record a standing instruction ("always X", "never Y", "prefer A over B")
+- `list_rules` — List the standing rules currently stored
+- `update_rule` — Reword, rescope, or switch off a rule
+- `delete_rule` — Remove a rule permanently
 
 **Workflow:**
 
@@ -21,3 +25,11 @@ You have access to an `agent-memory` MCP server with these tools:
    `store_memory` keeps reusable lessons, `store_session_log` keeps the chronological record.
 6. To answer "when did I work on X?" or "what did I do last week?", call `search_session_log`
    with a keyword and/or a `from`/`to` date range rather than inferring it from git history
+7. When the user states a durable preference or corrects how you work ("always…", "never…",
+   "prefer X over Y", "ask before…"), call `store_rule` THE MOMENT they say it. A rule is not a
+   memory: a memory has a symptom you can search for later, a rule has none and is instead
+   returned to you by `get_context` at the start of every task. Do not store one-off instructions
+   that only apply to the current task
+8. Treat the rules that come back from `get_context` as instructions, not context. Change them
+   only through `store_rule` / `update_rule` / `delete_rule`, and never read or write
+   `memory.db` directly with sqlite3 — the database belongs to the server

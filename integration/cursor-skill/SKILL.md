@@ -85,6 +85,25 @@ search_session_log({ query: "orders", project: "lufa-development-yii2" })
 
 Results come back grouped by date, newest first.
 
+### When the user states a standing preference
+
+Call `store_rule` the moment they say it — "always X", "never Y", "prefer A over B",
+"ask before Z". This is NOT a memory: a memory has a symptom you can search for later,
+a rule has none, which is why rules are returned to you by `get_context` instead.
+
+```
+store_rule({
+  rule: "Never force-push a branch that is already pushed",
+  mode: "never",
+  rationale: "it rewrites history teammates have already pulled",
+  priority: "critical",
+  tags: "git,branching"
+})
+```
+
+Scope it with `project` when it applies to one repo only. To change or retire one, use
+`update_rule` (with `active: false` to park it) or `delete_rule` — never edit the database.
+
 ## Rules
 
 1. Always search before attempting a fix for any non-trivial error
@@ -95,6 +114,8 @@ Results come back grouped by date, newest first.
 6. Set `project` only for project-specific issues; omit for general knowledge
 7. Always call `store_session_log` before finishing, even when there is no memory to store
 8. Never rewrite an existing work-log row -- the log is append-only, one row per session
+9. Treat the standing rules returned by `get_context` as instructions for the whole session, not background
+10. Never open `~/.agent-memory/memory.db` with sqlite3 to read or write -- go through the MCP tools
 
 ## Good Memory Entry Checklist
 

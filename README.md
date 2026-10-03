@@ -1,6 +1,6 @@
 # Agent Memory MCP
 
-A local MCP (Model Context Protocol) server that acts as a persistent memory database for coding agents. It stores bugs, patterns, gotchas, and learnings so agents never repeat the same mistakes.
+A local MCP (Model Context Protocol) server that acts as a persistent memory database for coding agents. It stores bugs, patterns, gotchas, and learnings so agents never repeat the same mistakes, keeps a daily work log, and holds the standing rules an agent should obey in every session.
 
 Works with **Cursor IDE**, **OpenAI Codex CLI**, **Claude Desktop**, and any MCP-compatible client.
 
@@ -200,6 +200,51 @@ Search the daily work log. Results are grouped by date, newest first.
 | project   | No       | Filter by project or repo name                                    |
 | limit     | No       | Max sessions (default 20)                                         |
 
+### store_rule
+
+Record a standing instruction that applies to every future session. See [Standing Rules](#standing-rules).
+
+| Parameter | Required | Description                                                                 |
+| --------- | -------- | --------------------------------------------------------------------------- |
+| rule      | Yes      | The instruction, imperative and one line                                    |
+| mode      | Yes      | `always`, `never`, `prefer`, or `ask`                                       |
+| rationale | No       | Why the user wants it — a rule with a reason survives edge cases            |
+| project   | No       | Scope to one repo (omit for everywhere)                                     |
+| area      | No       | Scope to one tech area: `git`, `sql`, `vue`                                 |
+| priority  | No       | `critical`, `high`, or `normal` (default)                                   |
+| tags      | No       | Comma-separated tags                                                        |
+
+### list_rules
+
+List stored rules. Active ones are injected automatically, so this is for finding an ID or auditing.
+
+| Parameter        | Required | Description                                            |
+| ---------------- | -------- | ------------------------------------------------------ |
+| project          | No       | Global rules plus the ones scoped to this project      |
+| area             | No       | Filter by tech area                                    |
+| mode             | No       | Filter by instruction shape                            |
+| priority         | No       | Filter by priority                                     |
+| include_inactive | No       | Include switched-off rules (default false)             |
+| limit            | No       | Max rules (default 100)                                |
+
+### update_rule
+
+Reword, rescope, or switch off a rule.
+
+| Parameter   | Required | Description                                             |
+| ----------- | -------- | ------------------------------------------------------- |
+| id          | Yes      | The rule ID (from `list_rules`)                         |
+| active      | No       | `false` suspends the rule without losing its wording    |
+| (any field) | No       | Any field from `store_rule` can be updated              |
+
+### delete_rule
+
+Remove a rule permanently. Prefer `update_rule` with `active: false` when merely pausing it.
+
+| Parameter | Required | Description           |
+| --------- | -------- | --------------------- |
+| id        | Yes      | The rule ID to delete |
+
 ## Daily Work Log
 
 Separate from the memory entries above, the server keeps a chronological log of what
@@ -224,11 +269,62 @@ time. `work_date` is stored as a **local** calendar day (`date('now','localtime'
 rather than derived from the UTC `created_at`, so an evening session is filed under
 the day you actually worked, not the next one.
 
+## Standing Rules
+
+The third concern, and the one the other two cannot serve: an instruction the user
+wants obeyed from now on. "Never force-push a shared branch." "Prefer pnpm over npm."
+
+A memory is something *learned* — it has a symptom, and it is found by searching for
+that symptom when you hit it. A rule has no symptom, and searching is exactly what
+fails it: nothing prompts an agent to look up "always prefer X" in the second before
+it reaches for Y. So rules are not searched at all. They are **pushed**:
+
+|           | `memories`                      | `rules`                                 |
+| --------- | ------------------------------- | --------------------------------------- |
+| Is        | something learned               | something instructed                    |
+| Found by  | searching for the symptom       | never searched — injected wholesale     |
+| Written   | after a bug or discovery        | the moment the user states a preference |
+| Index     | `memories_fts`                  | none needed; a dozen rows, read in full |
+
+Two delivery paths, because each surface guarantees something different:
+
+- **`get_context`** returns active rules ahead of the memories. Cursor and Codex are
+  instructed to call it at the start of every task, so that is where a rule reaches them.
+- **A `SessionStart` hook** (Claude Code) injects them before the first prompt, which
+  covers the sessions where `get_context` is never called at all.
+
+Keep the set small. Rules are pushed into every session, so they compete for attention
+with everything else in context — ten sharp rules beat sixty, and `update_rule` with
+`active: false` parks one without losing its wording.
+
+### Session hook (Claude Code)
+
+A hook is a shell command and cannot call an MCP tool, so the CLI is the tool-equivalent
+path into the same storage — no second copy of the SQL:
+
+```bash
+node /path/to/agent-memory-mcp/dist/cli.js rules --cwd "$PWD" --format hook
+```
+
+`--cwd` resolves the project by walking up to the nearest `.git`, so a session started
+in a subdirectory still gets that repository's rules. With no rules stored it prints
+nothing and exits 0. Register it in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "~/.claude/hooks/rules-inject.sh", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
 ## Database
 
-Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5). Two independent
-tables live there: `memories` (indexed by `memories_fts`) and `session_log`
-(indexed by `session_log_fts`).
+Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5). Three independent
+tables live there: `memories` (indexed by `memories_fts`), `session_log` (indexed by
+`session_log_fts`), and `rules` (no index — it is read in full, never searched).
 
 ### Storage Setup
 
@@ -257,8 +353,12 @@ If Google Drive becomes unavailable (e.g. app not installed), the server automat
 
 ### Manual Inspection
 
+Read-only, and only for inspection. Every write — and every read an agent acts on —
+belongs in the MCP tools or the CLI above; a second path to these rows drifts from the
+first, and this is a WAL database that may be sitting on cloud-synced storage.
+
 ```bash
-sqlite3 ~/.agent-memory/memory.db
+sqlite3 -readonly ~/.agent-memory/memory.db
 
 -- List recent entries
 SELECT id, title, area, severity FROM memories ORDER BY created_at DESC LIMIT 10;
@@ -270,6 +370,9 @@ SELECT * FROM memories WHERE id IN (
 
 -- Count by area
 SELECT area, COUNT(*) FROM memories GROUP BY area;
+
+-- Rules currently in force
+SELECT mode, rule, project FROM rules WHERE active = 1;
 
 -- Sessions per day, most recent first
 SELECT work_date, COUNT(*) FROM session_log GROUP BY work_date ORDER BY work_date DESC;
@@ -305,5 +408,7 @@ npm start            # Run the built version
 2. **When encountering an error**: Call `search_memory` with the error message
 3. **After fixing a bug**: Call `store_memory` with all relevant details
 4. **When a fix is refined**: Call `update_memory` to improve the entry
+5. **When the user states a durable preference**: Call `store_rule` immediately — not at the end of the session, by which point the wording is lost
+6. **At the end of every session**: Call `store_session_log` with what was worked on
 
 The `integration/` folder contains skill files and rules that teach agents this workflow automatically.
