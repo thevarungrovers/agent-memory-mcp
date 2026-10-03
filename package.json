@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "agent-memory-mcp": "dist/index.js"
+    "agent-memory-mcp": "dist/index.js",
+    "agent-memory": "dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
