@@ -9,7 +9,7 @@
  * It never fails loudly. A hook that errors is a hook that disrupts every session
  * start, so an unreadable database means no output and exit 0.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { getActiveRules } from "./db.js";
 import type { RuleEntry } from "./types.js";
@@ -25,8 +25,15 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
     const eq = arg.indexOf("=");
     if (eq > -1) {
       flags[arg.slice(2, eq)] = arg.slice(eq + 1);
+      continue;
+    }
+    // A flag followed by another flag (or nothing) is a boolean, not a flag with a
+    // value: --hook-input --format markdown must not swallow --format as its argument.
+    const next = rest[i + 1];
+    if (next === undefined || next.startsWith("--")) {
+      flags[arg.slice(2)] = "true";
     } else {
-      flags[arg.slice(2)] = rest[i + 1] ?? "";
+      flags[arg.slice(2)] = next;
       i++;
     }
   }
@@ -45,6 +52,20 @@ function resolveProject(cwd: string): string {
     const parent = dirname(dir);
     if (parent === dir) return basename(resolve(cwd));
     dir = parent;
+  }
+}
+
+/**
+ * Claude Code hands a hook its event as JSON on stdin. Parsing it here rather than in
+ * the shell script keeps the hook free of a jq dependency — jq is not reliably on a
+ * hook's PATH — and keeps the one piece of real logic in a place that can be tested.
+ */
+function cwdFromStdin(): string | null {
+  try {
+    const payload = JSON.parse(readFileSync(0, "utf8"));
+    return typeof payload?.cwd === "string" && payload.cwd ? payload.cwd : null;
+  } catch {
+    return null;
   }
 }
 
@@ -84,12 +105,13 @@ function main(): void {
 
   if (command !== "rules") {
     process.stderr.write(
-      "Usage: agent-memory rules [--project <name> | --cwd <path>] [--format hook|markdown|json]\n"
+      "Usage: agent-memory rules [--project <name> | --cwd <path> | --hook-input] [--format hook|markdown|json]\n"
     );
     process.exit(command ? 1 : 0);
   }
 
-  const project = flags.project || (flags.cwd ? resolveProject(flags.cwd) : null);
+  const cwd = flags.cwd || ("hook-input" in flags ? cwdFromStdin() : null);
+  const project = flags.project || (cwd ? resolveProject(cwd) : null);
   const rules = getActiveRules(project);
   if (rules.length === 0) return;
 
