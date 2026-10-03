@@ -9,6 +9,10 @@ import { registerUpdateMemory } from "./tools/updateMemory.js";
 import { registerDeleteMemory } from "./tools/deleteMemory.js";
 import { registerStoreSessionLog } from "./tools/storeSessionLog.js";
 import { registerSearchSessionLog } from "./tools/searchSessionLog.js";
+import { registerStoreRule } from "./tools/storeRule.js";
+import { registerListRules } from "./tools/listRules.js";
+import { registerUpdateRule } from "./tools/updateRule.js";
+import { registerDeleteRule } from "./tools/deleteRule.js";
 
 const server = new McpServer(
   { name: "agent-memory", version: "1.0.0" },
@@ -19,7 +23,12 @@ const server = new McpServer(
       "Use search_memory when you encounter an error to check for known fixes. " +
       "Use store_memory after fixing a bug or discovering a pitfall to prevent recurrence. " +
       "Separately, use store_session_log once at the end of every session to record what was worked on, " +
-      "and search_session_log to answer questions about when past work happened.",
+      "and search_session_log to answer questions about when past work happened. " +
+      "Rules are a third, distinct concern: store_rule records a standing instruction the user wants obeyed " +
+      "in every future session (\"always X\", \"never Y\", \"prefer A over B\"). Call it the moment the user states one. " +
+      "Active rules are returned by get_context and injected at session start, so you do not need to ask for them. " +
+      "All of this data lives in one SQLite database that only this server should write to: " +
+      "read and change it through these tools, never with sqlite3 or a direct connection.",
   }
 );
 
@@ -33,6 +42,10 @@ registerUpdateMemory(server);
 registerDeleteMemory(server);
 registerStoreSessionLog(server);
 registerSearchSessionLog(server);
+registerStoreRule(server);
+registerListRules(server);
+registerUpdateRule(server);
+registerDeleteRule(server);
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
