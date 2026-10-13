@@ -34,6 +34,25 @@ You have access to an `agent-memory` MCP server with tools for persistent knowle
 3. Scope it with `project` when it only applies to one repo; leave it off for a rule that applies everywhere
 4. Do not store one-off instructions that only apply to the task in hand
 
+**Before storing something new:**
+1. `search_memory` and `get_context` return SHORT PROJECTIONS — id, title and the opening of the
+   symptom. Call `get_memory` with an id when you need the full entry
+2. Call `find_similar` first. If the store already covers it, amend that entry rather than adding
+   a near-duplicate beside it
+
+**When an entry is wrong or has been replaced:**
+1. Call `relate_memories` to record that one supersedes/corrects/contradicts the other. Do NOT
+   write "CORRECTION to ..." into the prose — nothing can act on that, so both entries keep
+   answering every query and the stale one is indistinguishable from the current one
+2. Prefer `archive_memory` over `delete_memory`: archiving is reversible and keeps the entry
+   readable by id
+3. Never paraphrase an existing `symptom`. It holds the exact string a later search matches on,
+   and tidying it up makes the entry unfindable while it still reads perfectly well
+
+**Dates:**
+1. Every timestamp in this database is LOCAL time. Compare date columns directly; do not wrap
+   them in `date(col,'localtime')`, which would shift an already-local value a second time
+
 **The rules returned by `get_context` are instructions, not background:**
 1. Follow them for the whole session; a rule marked ASK means confirm before acting
 2. Change them only through `store_rule` / `update_rule` / `delete_rule`

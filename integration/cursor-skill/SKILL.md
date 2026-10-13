@@ -25,7 +25,9 @@ Review the returned memories before writing any code.
 
 ### When you encounter an error
 
-Call `search_memory` with the error message or symptom:
+Call `search_memory` with the error message or symptom. It returns a short projection of
+each hit — id, title, and the opening of the symptom — so a broad query cannot exhaust your
+tool-output budget. Call `get_memory({ id })` for the full entry:
 
 ```
 search_memory({ query: "Cannot read properties of undefined reading map" })
@@ -63,6 +65,28 @@ update_memory({ id: "abc-123", fix: "Updated fix with additional edge case handl
 
 Call `store_session_log` with what you worked on. This is a SEPARATE concern from
 `store_memory`: memories are reusable lessons, the work log is the chronological record
+
+## Keeping the store healthy
+
+Before adding an entry, call `find_similar({ id })` or `find_similar({ text })`. This store
+decays by accumulating near-duplicates and by agents fixing a stale entry with a new entry
+written next to it — both then answer every query, and the stale one is indistinguishable
+from the current one.
+
+```
+find_similar({ text: "gh targets the wrong repository" })
+relate_memories({ from_id: "<newer>", to_id: "<older>", kind: "corrects" })
+archive_memory({ id: "<duplicate>", reason: "duplicate_of", superseded_by: "<original>" })
+restore_memory({ id: "<id>" })
+```
+
+- Use `relate_memories`, never a "CORRECTION to ..." line in the prose: the relationship has
+  to be queryable to be worth anything.
+- Prefer `archive_memory` to `delete_memory` — it is reversible and the entry stays readable
+  by id.
+- Never paraphrase an existing `symptom`. It holds the exact string a later search matches
+  on, and tidying it up makes the entry unfindable while it still reads perfectly well.
+- Every timestamp here is LOCAL time; compare date columns directly.
 of what happened. Log every session, including ones that produced no memory at all.
 
 ```

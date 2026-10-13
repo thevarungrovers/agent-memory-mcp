@@ -234,6 +234,44 @@ function migrateLocaltime(db: Database.Database): void {
 }
 
 /**
+ * Catches rows a server process running the previous build wrote after the conversion.
+ *
+ * dist/ is loaded once per client, so an MCP server started before an upgrade keeps
+ * writing UTC until that client restarts. Those rows are stamped ahead of local time,
+ * which is otherwise impossible, so they are unambiguous west of Greenwich and this
+ * simply never matches east of it. Cheap, bounded, and it closes the window without
+ * anyone having to notice it was open.
+ */
+function sweepStragglerTimestamps(db: Database.Database): void {
+  const offset = db.prepare("SELECT strftime('%s','now','localtime') - strftime('%s','now') AS secs").get() as {
+    secs: number;
+  };
+  if (offset.secs >= 0) return;
+
+  const fixed = db
+    .prepare(
+      `UPDATE memories SET
+         created_at = datetime(created_at, 'localtime'),
+         updated_at = datetime(updated_at, 'localtime')
+       WHERE created_at > datetime('now', 'localtime')`
+    )
+    .run();
+  db.prepare(
+    `UPDATE rules SET
+       created_at = datetime(created_at, 'localtime'),
+       updated_at = datetime(updated_at, 'localtime')
+     WHERE created_at > datetime('now', 'localtime')`
+  ).run();
+  db.prepare(
+    "UPDATE session_log SET created_at = datetime(created_at, 'localtime') WHERE created_at > datetime('now', 'localtime')"
+  ).run();
+
+  if (fixed.changes > 0) {
+    process.stderr.write(`agent-memory: converted ${fixed.changes} straggler timestamps to local time\n`);
+  }
+}
+
+/**
  * Columns, tables and guards the nightly curator needs. Split out of migrate() only
  * for length; it is called from there and runs on every process start like the rest.
  *
@@ -363,6 +401,7 @@ function migrateCuration(db: Database.Database): void {
   `);
 
   migrateLocaltime(db);
+  sweepStragglerTimestamps(db);
 
   // Column-level history, one INSERT per tracked column. Generated rather than written
   // out thirteen times by hand; SQLite trigger bodies cannot loop.
