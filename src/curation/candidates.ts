@@ -43,7 +43,7 @@ export interface Cluster {
 }
 
 export interface CandidatePacket {
-  mode: "nightly" | "sweep";
+  mode: "nightly" | "sweep" | "backfill";
   window: { from: string | null; to: string | null };
   generated_at: string;
   corpus: ReturnType<typeof memoryStats>;
@@ -104,20 +104,28 @@ function buildCluster(candidate: MemoryEntry): Cluster {
 }
 
 export function buildPacket(opts: {
-  mode: "nightly" | "sweep";
+  mode: "nightly" | "sweep" | "backfill";
   since?: string;
   until?: string;
   area?: string;
   limit?: number;
+  onlyUncurated?: boolean;
   archivesRemaining: number;
 }): CandidatePacket {
+  // The nightly pass asks "what changed?"; a sweep or backfill asks "what has waited
+  // longest?". The second has to be corpus-wide and ordered by staleness or it cannot
+  // terminate — an earlier version walked one area per run ordered by updated_at DESC,
+  // which re-picked the same newest rows forever and left 286 of 758 entries, all of
+  // them in the six largest areas, permanently unreachable.
   const candidates =
-    opts.mode === "sweep"
-      // The sweep walks one area at a time rather than loading the corpus at once:
-      // duplicates almost always share an area, so this clusters naturally and keeps
-      // each pass bounded.
-      ? listCurationCandidates({ area: opts.area, limit: opts.limit ?? 40, includeClean: true })
-      : listCurationCandidates({ since: opts.since, until: opts.until, limit: opts.limit ?? 25 });
+    opts.mode === "nightly"
+      ? listCurationCandidates({ since: opts.since, until: opts.until, limit: opts.limit ?? 25 })
+      : listCurationCandidates({
+          limit: opts.limit ?? 40,
+          includeClean: true,
+          order: "stale",
+          onlyUncurated: opts.onlyUncurated,
+        });
 
   return {
     mode: opts.mode,

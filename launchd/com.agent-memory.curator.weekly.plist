@@ -6,10 +6,14 @@
   TEMPLATE. The __PROJECT_ROOT__ and __NODE_BIN__ tokens are substituted by
   scripts/install-curator.sh; do not copy this file into LaunchAgents by hand.
 
-  The sweep walks one area per week rather than the whole corpus at once: duplicates
-  almost always share an area, so this clusters naturally and keeps each pass bounded.
-  It is the higher risk pass by some distance, since its candidates are rows nothing
-  recent has touched, so it is far more conservative about what it will act on.
+  The sweep takes the entries that have waited longest, never-curated first, corpus
+  wide. Ordering by staleness is what lets it terminate: an earlier version walked one
+  area per run ordered by most recently updated, which re-picked the same rows on every
+  visit and left everything below the per run cap unreachable.
+
+  For an existing store, run scripts/backfill-curation.sh once first. The nightly pass
+  only ever sees what changed since it last ran, so a store with history carries a
+  backlog neither job would otherwise reach.
 
   XML forbids a double hyphen inside a comment, so there are none here.
 -->

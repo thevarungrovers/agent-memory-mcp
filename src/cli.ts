@@ -19,7 +19,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   getActiveRules, getState, listMemories, memoryStats, revertRun, setState, snapshotTo,
 } from "./db.js";
-import { curate } from "./curation/run.js";
+import { backfill, curate } from "./curation/run.js";
 import { diffCanaries, loadBaseline, loadCanaries, runCanaries, saveBaseline } from "./curation/canary.js";
 import type { RuleEntry } from "./types.js";
 
@@ -117,6 +117,9 @@ const USAGE = `agent-memory <command> [flags]
   memories   --since <YYYY-MM-DD> [--until <d>] [--format json|text]
   curate     [--mode nightly|sweep] [--dry-run] [--home <dir>] [--claude-bin <path>]
              [--model <name>] [--limit <n>]     one full curation pass
+  backfill   [--batch <n>] [--max-batches <n>]  one-time walk over every entry that has
+                                                never been curated. Applies only the
+                                                additive verdicts; removals are proposed
   canary     [--file <path>] [--save-baseline]  pinned queries that prove retrieval still works
   undo       --run <run_id>                     revert one curation run, column by column
   state      [--get <key>] [--set <key>=<value>]
@@ -259,6 +262,30 @@ function main(): void {
     case "curate":
       process.exit(runCuration(flags));
       break;
+
+    case "backfill": {
+      const home = curatorHome(flags);
+      const stateDir = join(home, "state");
+      mkdirSync(stateDir, { recursive: true });
+      const statePrompt = join(stateDir, "PROMPT.md");
+      if (!existsSync(statePrompt)) writeFileSync(statePrompt, readFileSync(join(home, "PROMPT.md"), "utf8"));
+
+      const result = backfill({
+        mode: "sweep",
+        stateDir,
+        reportDir: join(home, "reports"),
+        canariesFile: join(home, "canaries.json"),
+        claudeBin: flags["claude-bin"],
+        model: flags.model,
+        batchSize: flags.batch ? Number(flags.batch) : undefined,
+        maxBatches: flags["max-batches"] ? Number(flags["max-batches"]) : undefined,
+        log: (line) => process.stdout.write(`[backfill] ${line}\n`),
+      });
+      process.stdout.write(`\n${result.headline}\n`);
+      if (result.reportPath) process.stdout.write(`report: ${result.reportPath}\n`);
+      process.exit(result.status === "failed" ? 1 : 0);
+      break;
+    }
 
     case "canary":
       process.exit(runCanaryCommand(flags));

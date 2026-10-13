@@ -69,7 +69,19 @@ function fingerprintPreserved(before: MemoryEntry, after: MemoryEntry): boolean 
   return true;
 }
 
-export function applyDecisions(runId: string, decisions: Decision[], dryRun = false): ApplyOutcome {
+export interface ApplyOptions {
+  dryRun?: boolean;
+  /**
+   * Archives become proposals regardless of how well they verify. Used by the backlog
+   * pass: a one-time walk over hundreds of entries that have never been reviewed is
+   * not the place to remove anything unattended, however good each individual case
+   * looks. The additive verdicts still apply, so the pass is not merely advisory.
+   */
+  proposeArchivesOnly?: boolean;
+}
+
+export function applyDecisions(runId: string, decisions: Decision[], opts: ApplyOptions = {}): ApplyOutcome {
+  const dryRun = opts.dryRun ?? false;
   const db = getDb();
   const outcome: ApplyOutcome = { applied: 0, proposed: 0, refused: 0, details: [] };
   let budget = archivesRemaining();
@@ -164,6 +176,10 @@ export function applyDecisions(runId: string, decisions: Decision[], dryRun = fa
 
         case "ARCHIVE": {
           const reason = d.reason;
+          if (opts.proposeArchivesOnly) {
+            recordCurationAction({ run_id: runId, memory_id: d.memory_id, verdict: "ARCHIVE", tier: "proposed", reason: reason ?? null, cites: d.cites ?? null, rationale: d.rationale });
+            return note(d, "proposed", "backlog pass proposes removals rather than applying them");
+          }
           // Reasons with no machine-checkable predicate are proposals, never actions.
           if (reason !== "duplicate_of" && reason !== "superseded_by") {
             recordCurationAction({ run_id: runId, memory_id: d.memory_id, verdict: "ARCHIVE", tier: "proposed", reason: reason ?? null, cites: d.cites ?? null, rationale: d.rationale });

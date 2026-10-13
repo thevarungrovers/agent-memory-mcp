@@ -1016,12 +1016,25 @@ export function listCurationCandidates(filters: {
   area?: string;
   limit?: number;
   includeClean?: boolean;
+  /**
+   * "recent" (default) is right for the nightly pass, which is about what just changed.
+   *
+   * "stale" takes the entries waiting longest — never-curated first, since curated_at
+   * is NULL and SQLite sorts NULLs first ascending. This is what makes a backlog pass
+   * terminate. Ordering a sweep by updated_at DESC, as this first did, re-picks the
+   * same newest rows on every visit: a KEEP marks the row curated but leaves
+   * updated_at and curator_edit_count alone, so the selection never moves and
+   * everything below the per-run cap is unreachable forever.
+   */
+  order?: "recent" | "stale";
+  onlyUncurated?: boolean;
 }): MemoryEntry[] {
   const db = getDb();
   const conditions = ["archived_at IS NULL", "curator_edit_count < 2"];
   const params: Record<string, string | number> = {};
 
   if (!filters.includeClean) conditions.push("dirty = 1");
+  if (filters.onlyUncurated) conditions.push("curated_at IS NULL");
   if (filters.since) {
     conditions.push("date(updated_at) >= :since");
     params.since = filters.since;
@@ -1036,9 +1049,26 @@ export function listCurationCandidates(filters: {
   }
   params.limit = filters.limit ?? 25;
 
+  const orderBy =
+    filters.order === "stale"
+      ? "ORDER BY curated_at ASC, updated_at ASC"
+      : "ORDER BY updated_at DESC";
+
   return db
-    .prepare(`SELECT * FROM memories WHERE ${conditions.join(" AND ")} ORDER BY updated_at DESC LIMIT :limit`)
+    .prepare(`SELECT * FROM memories WHERE ${conditions.join(" AND ")} ${orderBy} LIMIT :limit`)
     .all(params) as MemoryEntry[];
+}
+
+/** How much of the corpus has never been looked at. Drives the backfill's progress line. */
+export function curationCoverage(): { total: number; curated: number; remaining: number } {
+  return getDb()
+    .prepare(
+      `SELECT COUNT(*) total,
+              COALESCE(SUM(CASE WHEN curated_at IS NOT NULL THEN 1 ELSE 0 END), 0) curated,
+              COALESCE(SUM(CASE WHEN curated_at IS NULL THEN 1 ELSE 0 END), 0) remaining
+       FROM memories WHERE archived_at IS NULL`
+    )
+    .get() as { total: number; curated: number; remaining: number };
 }
 
 export function listAreas(): { area: string; n: number }[] {
