@@ -86,8 +86,8 @@ function migrate(db: Database.Database): void {
       code_example TEXT,
       tags TEXT,
       severity TEXT NOT NULL DEFAULT 'major' CHECK(severity IN ('critical', 'major', 'minor', 'info')),
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -129,7 +129,7 @@ function migrate(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS session_log (
       id TEXT PRIMARY KEY,
       work_date TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       project TEXT,
       summary TEXT NOT NULL,
       tags TEXT
@@ -180,8 +180,8 @@ function migrate(db: Database.Database): void {
       priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('critical', 'high', 'normal')),
       active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
       tags TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS rules_unique_idx
@@ -189,6 +189,48 @@ function migrate(db: Database.Database): void {
   `);
 
   migrateCuration(db);
+}
+
+/**
+ * One-time conversion of stored timestamps from UTC to local time.
+ *
+ * Every timestamp in this database now reads as local time, because a store that mixes
+ * the two is a trap with no good outcome: a date comparison is either silently wrong
+ * for four hours a day, or correct only if every caller remembers a modifier that is
+ * invisible when it is missing. The failure is specifically nasty for a scheduled job —
+ * after 20:00 EDT the UTC date has already rolled over, so an evening query matches
+ * nothing written that evening, returns no rows, and reports success.
+ *
+ * Runs once, guarded by a flag, and only touches rows that pre-date the change.
+ * work_date is deliberately excluded: it was always a local calendar date.
+ */
+function migrateLocaltime(db: Database.Database): void {
+  const done = db.prepare("SELECT value FROM curation_state WHERE key = 'localtime_migration'").get() as
+    | { value: string }
+    | undefined;
+  if (done?.value === "1") return;
+
+  const offset = db.prepare("SELECT strftime('%s','now','localtime') - strftime('%s','now') AS secs").get() as {
+    secs: number;
+  };
+
+  // A zero offset (UTC machine) means the stored values are already local by definition.
+  if (offset.secs !== 0) {
+    db.exec(`
+      UPDATE memories SET
+        created_at = datetime(created_at, 'localtime'),
+        updated_at = datetime(updated_at, 'localtime');
+      UPDATE session_log SET created_at = datetime(created_at, 'localtime');
+      UPDATE rules SET
+        created_at = datetime(created_at, 'localtime'),
+        updated_at = datetime(updated_at, 'localtime');
+    `);
+  }
+
+  db.prepare("INSERT INTO curation_state (key, value) VALUES ('localtime_migration', '1')").run();
+  process.stderr.write(
+    `agent-memory: converted stored timestamps to local time (offset ${offset.secs / 3600}h)\n`
+  );
 }
 
 /**
@@ -245,7 +287,7 @@ function migrateCuration(db: Database.Database): void {
       to_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
       kind TEXT NOT NULL CHECK(kind IN ('supersedes', 'corrects', 'contradicts', 'duplicate_of', 'refines')),
       note TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       created_by TEXT NOT NULL DEFAULT 'session'
     );
     CREATE UNIQUE INDEX IF NOT EXISTS memory_relations_unique_idx ON memory_relations(from_id, to_id, kind);
@@ -262,7 +304,7 @@ function migrateCuration(db: Database.Database): void {
       column_name TEXT NOT NULL,
       old_value TEXT,
       new_value TEXT,
-      changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      changed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       changed_by TEXT NOT NULL DEFAULT 'session'
     );
     CREATE INDEX IF NOT EXISTS memory_revisions_memory_idx ON memory_revisions(memory_id, changed_at DESC);
@@ -271,7 +313,7 @@ function migrateCuration(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS curation_runs (
       id TEXT PRIMARY KEY,
       mode TEXT NOT NULL CHECK(mode IN ('nightly', 'sweep')),
-      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       finished_at TEXT,
       status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'ok', 'failed', 'rolled_back')),
       window_from TEXT,
@@ -295,7 +337,7 @@ function migrateCuration(db: Database.Database): void {
       reason TEXT,
       cites TEXT,
       rationale TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
     CREATE INDEX IF NOT EXISTS curation_actions_run_idx ON curation_actions(run_id);
 
@@ -319,6 +361,8 @@ function migrateCuration(db: Database.Database): void {
     );
     INSERT OR IGNORE INTO curation_session (id, actor, run_id, started_at) VALUES (1, NULL, NULL, NULL);
   `);
+
+  migrateLocaltime(db);
 
   // Column-level history, one INSERT per tracked column. Generated rather than written
   // out thirteen times by hand; SQLite trigger bodies cannot loop.
@@ -610,18 +654,15 @@ export function listMemories(filters?: {
     conditions.push("severity = :severity");
     params.severity = filters.severity;
   }
-  // *** localtime, not date(updated_at) ***
-  // created_at/updated_at default to datetime('now'), which is UTC. A job running at
-  // 23:00 EDT is already on tomorrow's UTC date, so comparing against a local 'today'
-  // without this conversion matches nothing stored that evening — the query returns
-  // zero rows, reports success, and silently reviews nothing. session_log.work_date
-  // uses date('now','localtime') for the same reason; follow that, not the column default.
+  // Columns are stored in local time (see migrateLocaltime), so these compare directly.
+  // Do NOT wrap them in date(col,'localtime') — that would shift an already-local value
+  // a second time. The whole store is local; there is no UTC left to convert from.
   if (filters?.since) {
-    conditions.push("date(updated_at, 'localtime') >= :since");
+    conditions.push("date(updated_at) >= :since");
     params.since = filters.since;
   }
   if (filters?.until) {
-    conditions.push("date(updated_at, 'localtime') <= :until");
+    conditions.push("date(updated_at) <= :until");
     params.until = filters.until;
   }
   if (!filters?.include_archived) conditions.push("archived_at IS NULL");
@@ -668,10 +709,10 @@ export function updateMemory(
     // Deliberately NOT updated_at. The candidate window keys off recency, so a curator
     // write that bumped it would re-enter tomorrow's window, be re-read as ground truth
     // and rewritten again — the row drifting further from what a human wrote every night.
-    fields.push("curated_at = datetime('now')");
+    fields.push("curated_at = datetime('now', 'localtime')");
     fields.push("curator_edit_count = curator_edit_count + 1");
   } else {
-    fields.push("updated_at = datetime('now')");
+    fields.push("updated_at = datetime('now', 'localtime')");
     // A human touched it, so it is a fresh candidate again and the two-edit freeze lifts.
     fields.push("dirty = 1");
     fields.push("curator_edit_count = 0");
@@ -884,7 +925,7 @@ export function updateRule(id: string, updates: Partial<Omit<RuleEntry, "id" | "
 
   if (fields.length === 0) return existing;
 
-  fields.push("updated_at = datetime('now')");
+  fields.push("updated_at = datetime('now', 'localtime')");
   db.prepare(`UPDATE rules SET ${fields.join(", ")} WHERE id = :id`).run(params);
 
   return db.prepare("SELECT * FROM rules WHERE id = ?").get(id) as RuleEntry;
@@ -915,7 +956,7 @@ function uuid(): string {
  */
 export function setCurationActor(actor: string | null, runId: string | null): void {
   getDb()
-    .prepare("UPDATE curation_session SET actor = ?, run_id = ?, started_at = datetime('now') WHERE id = 1")
+    .prepare("UPDATE curation_session SET actor = ?, run_id = ?, started_at = datetime('now', 'localtime') WHERE id = 1")
     .run(actor, runId);
 }
 
@@ -943,11 +984,11 @@ export function listCurationCandidates(filters: {
 
   if (!filters.includeClean) conditions.push("dirty = 1");
   if (filters.since) {
-    conditions.push("date(updated_at, 'localtime') >= :since");
+    conditions.push("date(updated_at) >= :since");
     params.since = filters.since;
   }
   if (filters.until) {
-    conditions.push("date(updated_at, 'localtime') <= :until");
+    conditions.push("date(updated_at) <= :until");
     params.until = filters.until;
   }
   if (filters.area) {
@@ -977,9 +1018,9 @@ export function archiveMemory(
   const existing = getMemoryById(id);
   if (!existing || existing.archived_at) return null;
 
-  const extra = actor === "curator" ? ", curated_at = datetime('now')" : ", updated_at = datetime('now')";
+  const extra = actor === "curator" ? ", curated_at = datetime('now', 'localtime')" : ", updated_at = datetime('now', 'localtime')";
   db.prepare(
-    `UPDATE memories SET archived_at = datetime('now'), archive_reason = :reason,
+    `UPDATE memories SET archived_at = datetime('now', 'localtime'), archive_reason = :reason,
      superseded_by = COALESCE(:superseded_by, superseded_by)${extra} WHERE id = :id`
   ).run({ id, reason, superseded_by: supersededBy });
 
@@ -992,7 +1033,7 @@ export function restoreMemory(id: string): MemoryEntry | null {
   if (!existing || !existing.archived_at) return null;
   db.prepare(
     `UPDATE memories SET archived_at = NULL, archive_reason = NULL,
-     updated_at = datetime('now'), dirty = 1, curator_edit_count = 0 WHERE id = ?`
+     updated_at = datetime('now', 'localtime'), dirty = 1, curator_edit_count = 0 WHERE id = ?`
   ).run(id);
   return getMemoryById(id);
 }
@@ -1026,7 +1067,7 @@ export function getRelations(memoryId: string): MemoryRelation[] {
 }
 
 export function markCurated(id: string): void {
-  getDb().prepare("UPDATE memories SET curated_at = datetime('now'), dirty = 0 WHERE id = ?").run(id);
+  getDb().prepare("UPDATE memories SET curated_at = datetime('now', 'localtime'), dirty = 0 WHERE id = ?").run(id);
 }
 
 // ---- Run bookkeeping. The report's numbers come from these rows, never from the
@@ -1048,7 +1089,7 @@ export function finishCurationRun(
 ): void {
   getDb()
     .prepare(
-      `UPDATE curation_runs SET finished_at = datetime('now'), status = :status,
+      `UPDATE curation_runs SET finished_at = datetime('now', 'localtime'), status = :status,
        candidates = :candidates, applied = :applied, proposed = :proposed, notes = :notes WHERE id = :id`
     )
     .run({
@@ -1143,8 +1184,8 @@ export function memoryStats(): {
            length(COALESCE(symptom,'')) + length(COALESCE(root_cause,'')) + length(COALESCE(fix,''))
            + length(COALESCE(code_example,'')) + length(COALESCE(trigger_context,'')) ELSE 0 END), 0) prose_bytes,
          COUNT(DISTINCT CASE WHEN archived_at IS NULL THEN area END) areas,
-         MIN(date(created_at,'localtime')) oldest,
-         MAX(date(created_at,'localtime')) newest
+         MIN(date(created_at)) oldest,
+         MAX(date(created_at)) newest
        FROM memories`
     )
     .get() as ReturnType<typeof memoryStats>;

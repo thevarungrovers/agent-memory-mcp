@@ -17,7 +17,9 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test:curation": "tsx tests/curation.test.ts",
-    "test:surface": "node tests/mcp-surface.test.mjs"
+    "test:surface": "node tests/mcp-surface.test.mjs",
+    "test:flow": "tsx tests/curate-flow.test.ts",
+    "test": "npm run test:curation && npm run test:surface && npm run test:flow"
   },
   "keywords": [
     "mcp",

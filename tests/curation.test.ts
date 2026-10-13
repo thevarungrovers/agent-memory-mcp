@@ -191,6 +191,26 @@ ok("the ledger records the action", db.getCurationActions(runId).length === 1);
 db.finishCurationRun(runId, "ok", { candidates: 1, applied: 1, proposed: 0 });
 ok("the run closes", db.getCurationRun(runId)?.status === "ok");
 
+process.stdout.write("\nerosion guard\n");
+{
+  const { checkTrailingInvariants, recordStatsPoint } = await import("../src/curation/apply.js");
+  // Small corpora are exempt: a percentage on ten rows is noise, not erosion.
+  recordStatsPoint();
+  ok("a small corpus is exempt from the percentage check", checkTrailingInvariants().ok);
+
+  // Now plant a baseline large enough to be meaningful, and far enough above the
+  // present size to represent a month of quiet attrition.
+  const { setState } = await import("../src/db.js");
+  setState(
+    "stats_history",
+    JSON.stringify([{ date: new Date().toISOString().slice(0, 10), active: 200, prose_bytes: 900_000 }])
+  );
+  const check = checkTrailingInvariants();
+  ok("a big drop against a real baseline is caught", !check.ok);
+  ok("...and says which invariant broke", check.violations.some((v) => v.includes("active memories")));
+  setState("stats_history", null);
+}
+
 process.stdout.write("\nsnapshot\n");
 const snap = join(dir, "snap.db");
 db.snapshotTo(snap);

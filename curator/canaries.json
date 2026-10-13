@@ -1,0 +1,12 @@
+[
+  { "name": "gh-wrong-repo",        "query": "gh resolves to the wrong repository pass --repo" },
+  { "name": "force-push-blocked",   "query": "cannot force-push to this branch ruleset GH013" },
+  { "name": "utc-vs-localtime",     "query": "datetime now is UTC date grouping localtime trap" },
+  { "name": "claude-bin-launchd",   "query": "claude CLI not found launchd cmux shim TMPDIR" },
+  { "name": "agent-memory-layout",  "query": "agent-memory-mcp repo layout dist rebuild restart" },
+  { "name": "fts-syntax-error",     "query": "fts5 syntax error no such column toFtsQuery" },
+  { "name": "get-context-overflow", "query": "get_context exceeds maximum allowed tokens spill file" },
+  { "name": "worktree-provisioning","query": "worktree node_modules vendor absent pnpm install" },
+  { "name": "sqlite-wal-drive",     "query": "WAL sqlite cloud synced storage google drive symlink" },
+  { "name": "mcp-tool-annotations", "query": "MCP ToolAnnotations destructiveHint unset absent" }
+]
