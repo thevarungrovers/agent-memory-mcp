@@ -358,6 +358,7 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
   const promptTemplate = readFileSync(join(opts.stateDir, "PROMPT.md"), "utf8");
   let totals = { applied: 0, proposed: 0, refused: 0, seen: 0 };
   let batch = 0;
+  let modelError: string | null = null;
   const expected = Math.ceil(start.remaining / batchSize);
 
   setCurationActor("curator", runId);
@@ -388,13 +389,15 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
 
       const ids = packet.clusters.map((c) => c.candidate.id);
       if (!asked.ok) {
-        // One bad batch must not abandon the walk, but its entries stay uncurated so a
-        // later run picks them up rather than silently treating them as reviewed.
-        log(`batch ${batch}/${expected}: ${asked.error} — leaving these ${ids.length} for a later run`);
-        for (const id of ids) markCurated(id);
-        totals.refused += ids.length;
-        totals.seen += ids.length;
-        continue;
+        // Stop rather than skip. Leaving the batch uncurated is the right outcome — a
+        // later run must retry it rather than treat it as reviewed — but that is
+        // exactly why the loop cannot continue: the next selection would return the
+        // same rows and spin forever. Progress is already durable in curated_at, so
+        // re-running after the cause is fixed resumes from here.
+        log(`batch ${batch}/${expected}: ${asked.error}`);
+        log(`stopping with ${ids.length} entries left uncurated; re-run to resume from here`);
+        modelError = asked.error;
+        break;
       }
 
       const outcome = applyDecisions(runId, asked.decisions, { proposeArchivesOnly: true });
@@ -418,11 +421,12 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
   const canaryDiff = canaries.length && baseline ? diffCanaries(baseline, runCanaries(canaries)) : null;
   const end = curationCoverage();
 
-  finishCurationRun(runId, ftsAfter.ok ? "ok" : "failed", {
+  const status = ftsAfter.ok && !modelError ? "ok" : "failed";
+  finishCurationRun(runId, status, {
     candidates: totals.seen,
     applied: totals.applied,
     proposed: totals.proposed,
-    notes: `backfill: ${batch} batches, ${end.remaining} still uncurated`,
+    notes: `backfill: ${batch} batches, ${end.remaining} still uncurated${modelError ? ` — ${modelError}` : ""}`,
   });
 
   const { markdown, headline } = renderReport({
@@ -441,5 +445,5 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
     `backfill: ${totals.seen} entries over ${batch} batches | ${totals.applied} applied, `
     + `${totals.proposed} proposed, ${totals.refused} refused | ${end.remaining} still uncurated | ${headline}`;
 
-  return { runId, status: ftsAfter.ok ? "ok" : "failed", headline: summary, reportPath, notable: true };
+  return { runId, status, headline: summary, reportPath, notable: true };
 }
