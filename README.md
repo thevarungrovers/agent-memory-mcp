@@ -126,16 +126,33 @@ Store a bug, pattern, gotcha, or learning.
 
 ### search_memory
 
-Full-text search across all memory entries.
+Full-text search across all memory entries. Returns a **projection** of each hit — id,
+title, type/severity, area and the first 200 characters of the symptom — not the whole
+entry. Call `get_memory` for a full body.
 
-| Parameter | Required | Description                                            |
-| --------- | -------- | ------------------------------------------------------ |
-| query     | Yes      | Free-text search (error message, keyword, description) |
-| area      | No       | Filter by tech area                                    |
-| project   | No       | Filter by project                                      |
-| type      | No       | Filter by type                                         |
-| tags      | No       | Filter by tags (comma-separated, matches ANY)          |
-| limit     | No       | Max results (default 10)                               |
+> Why: this used to render every field of every hit, `code_example` included. At a
+> ~4.5KB mean body a 28-hit query came to 130,500 characters and exceeded the
+> tool-output cap, so no memories reached the model at all. Retrieval is two steps:
+> find cheaply, read one.
+
+| Parameter        | Required | Description                                            |
+| ---------------- | -------- | ------------------------------------------------------ |
+| query            | Yes      | Free-text search (error message, keyword, description) |
+| area             | No       | Filter by tech area                                    |
+| project          | No       | Filter by project                                      |
+| type             | No       | Filter by type                                         |
+| tags             | No       | Filter by tags (comma-separated, matches ANY)          |
+| limit            | No       | Max results (default 10)                               |
+| include_archived | No       | Also return archived entries (default false)           |
+
+### get_memory
+
+One entry in full, by id — including archived ones. The second half of the two-step
+retrieval above.
+
+| Parameter | Required | Description   |
+| --------- | -------- | ------------- |
+| id        | Yes      | The memory ID |
 
 ### get_context
 
@@ -147,18 +164,23 @@ Smart retrieval for the current task. Returns critical/major entries for the giv
 | task_description | No       | What you are about to do (used for semantic matching) |
 | project          | No       | Current project name                                  |
 
+Returns projections, for the same reason `search_memory` does.
+
 ### list_memories
 
 Browse entries with optional filters.
 
 | Parameter | Required | Description              |
 | --------- | -------- | ------------------------ |
-| project   | No       | Filter by project        |
-| area      | No       | Filter by area           |
-| type      | No       | Filter by type           |
-| severity  | No       | Filter by severity       |
-| limit     | No       | Max results (default 20) |
-| offset    | No       | Pagination offset        |
+| project          | No       | Filter by project                                        |
+| area             | No       | Filter by area                                           |
+| type             | No       | Filter by type                                           |
+| severity         | No       | Filter by severity                                       |
+| since            | No       | Only entries updated on/after this local date YYYY-MM-DD |
+| until            | No       | Only entries updated on/before this local date           |
+| include_archived | No       | Also list archived entries (default false)               |
+| limit            | No       | Max results (default 20)                                 |
+| offset           | No       | Pagination offset                                        |
 
 ### update_memory
 
@@ -171,11 +193,66 @@ Update an existing entry.
 
 ### delete_memory
 
-Remove an obsolete entry.
+Permanently remove an entry. **Prefer `archive_memory`** — it is reversible and keeps
+the entry readable by id.
 
 | Parameter | Required | Description             |
 | --------- | -------- | ----------------------- |
 | id        | Yes      | The memory ID to delete |
+
+### archive_memory
+
+Hide an entry from `search_memory`, `get_context` and `list_memories` while keeping it
+readable by id and restorable. This is the soft delete the nightly curator uses.
+
+| Parameter     | Required | Description                                                              |
+| ------------- | -------- | ------------------------------------------------------------------------ |
+| id            | Yes      | The memory ID to archive                                                 |
+| reason        | Yes      | `duplicate_of`, `superseded_by`, `stale`, or `no_longer_relevant`        |
+| superseded_by | No\*     | The entry that replaces this one. Required for the first two reasons      |
+
+Reasons are an enum rather than free text because a free-text reason always succeeds —
+"stale" will absorb anything asked of it. Only the two that can be machine-checked are
+ever acted on by an unattended run.
+
+### restore_memory
+
+Bring an archived entry back.
+
+| Parameter | Required | Description              |
+| --------- | -------- | ------------------------ |
+| id        | Yes      | The memory ID to restore |
+
+### find_similar
+
+Neighbours of an entry, for spotting redundancy before adding another near-duplicate.
+
+| Parameter | Required | Description                        |
+| --------- | -------- | ---------------------------------- |
+| id        | No\*     | Memory ID to find neighbours of    |
+| text      | No\*     | Free text, when there is no id yet |
+| limit     | No       | Max neighbours (default 8)         |
+
+\* One of `id` or `text` is required.
+
+### relate_memories
+
+Record that one entry supersedes, corrects, contradicts, duplicates or refines another.
+
+Use this instead of writing "CORRECTION to ..." into the prose. That convention is how
+this store decayed: nothing can act on it, so both entries keep answering every query
+and the stale one is indistinguishable from the current one.
+
+| Parameter | Required | Description                                                               |
+| --------- | -------- | ------------------------------------------------------------------------- |
+| from_id   | Yes      | The newer or correcting entry. Pass alone to list existing relations        |
+| to_id     | No       | The older or corrected entry                                              |
+| kind      | No\*     | `supersedes`, `corrects`, `contradicts`, `duplicate_of`, `refines`        |
+| note      | No       | One line on what changed                                                  |
+
+\* Required when `to_id` is given. A `corrects`/`contradicts` target becomes
+archive-immune: a correction read without the belief it corrects loses the reason the
+wrong belief was plausible.
 
 ### store_session_log
 
@@ -320,11 +397,163 @@ nothing and exits 0. Register it in `~/.claude/settings.json`:
 }
 ```
 
+## Nightly Curation
+
+A store that is only ever appended to decays in a specific way. An agent that finds a
+stale entry fixes it by **writing a new entry next to it**, because updating needs an id
+nobody looks up — so both keep answering every query and the stale one is
+indistinguishable from the current one. The same gotcha gets re-learned and re-stored by
+sessions that did not find the existing entry. Entries accumulate about repositories
+that no longer exist.
+
+The curator is a scheduled pass that reads what changed, compares it against the rest of
+the corpus, and merges, supersedes or archives. It is off until you install it.
+
+```sh
+npm run build
+bash scripts/install-curator.sh              # nightly only
+bash scripts/install-curator.sh nightly weekly
+bash scripts/install-curator.sh --status
+bash scripts/install-curator.sh --uninstall
+```
+
+Installing does not run anything — `RunAtLoad` is false, so the first pass is the next
+23:00. To force one:
+
+```sh
+bash scripts/run-curator.sh nightly
+```
+
+### Start with dry runs
+
+```sh
+CURATOR_EXTRA_ARGS=--dry-run bash scripts/run-curator.sh nightly
+```
+
+Every decision is recorded as a proposal and nothing is changed. Read a week of reports
+in `curator/reports/` before trusting it unattended. They cost nothing if its judgement
+turns out to be poor, which is the entire point of looking.
+
+### How a pass works
+
+1. **Preflight** — refuses to start if the store is not mounted (see below), if node
+   cannot load `better-sqlite3`, or if the FTS index is already inconsistent.
+2. **Snapshot** — `VACUUM INTO curator/state/snapshots/`, kept 14 days.
+3. **Packet** — the entries that changed since the last successful pass, each with its
+   nearest neighbours and a computed similarity score.
+4. **Decide** — a `claude -p` subprocess with two file tools and *no database access of
+   any kind*. It reads the packet, writes decisions as JSON.
+5. **Apply** — every claim the model makes is re-derived before it is acted on.
+6. **Verify** — FTS integrity, trailing-window invariants, and the canary set.
+7. **Report** — `curator/reports/<date>-<mode>.md`, generated from the ledger.
+
+The model never touches the database. That shape is doing three jobs: a nightly job
+should not depend on an MCP server (one spawned under launchd has been seen to die with
+`CONNECTION_CLOSED` while the identical invocation works from a terminal), no allowlist
+mistake can hand the model a write path, and every decision is reviewable before it is
+applied rather than after.
+
+### What it is allowed to do on its own
+
+Only things that can be checked:
+
+| Applied | Proposed for you |
+| ------- | ---------------- |
+| Archive a **verified** duplicate — similarity recomputed at apply time | Anything below that similarity threshold |
+| Stamp `superseded_by`, record relations | Archiving for "stale" or "no longer relevant" |
+| Add tags (never remove one) | Merges, splits, anything else |
+| Append a dated note | |
+
+And things it structurally cannot do, enforced by SQLite triggers rather than by
+instructions — no prompt, allowlist or CLI flag routes around them:
+
+- **`symptom` and `code_example` are append-only.** An entry is findable because its
+  symptom holds the exact string a later search matches — error text, flags, paths, line
+  numbers. Paraphrasing them is the most damaging thing available here, because the
+  entry still reads well and has quietly become unreachable.
+- No edit that cuts more than 20% of the prose.
+- No severity downgrade — otherwise "never archive a critical entry" is beaten by
+  downgrading it first.
+- No third edit to the same entry until a human touches it.
+- No archiving an entry that something else corrects or contradicts: the pair is the
+  content.
+- No hard deletes.
+
+Archive budgets are counted from the ledger and enforced in code. They are deliberately
+**absent from the prompt** — a budget the model can see becomes a target.
+
+### Canaries
+
+`curator/canaries.json` holds real queries with their top-3 results pinned, re-run before
+and after every pass. This is the only end-to-end check that the store still answers the
+questions it used to, and it catches blandification, over-archiving and a stale index in
+one line. Edit it to match the questions you actually ask.
+
+```sh
+node dist/cli.js canary                   # compare against the baseline
+node dist/cli.js canary --save-baseline   # re-pin after deliberate changes
+```
+
+### Undoing a pass
+
+```sh
+node dist/cli.js undo --run <run_id>
+```
+
+Reverts column by column from `memory_revisions`, and **skips any entry a real session
+has edited since** — which a snapshot restore would silently overwrite. The run id is at
+the top of every report.
+
+### If it fails
+
+A failed pass latches: `last_run_failed` is set, the watermark is not advanced, and the
+next scheduled run refuses to start. A job that is broken should stop and say so, not
+retry into the same wall nightly. After looking at the report:
+
+```sh
+node dist/cli.js state --set last_run_failed=0
+```
+
+### Expect "nightly" to mean "next morning"
+
+If the machine is asleep at 23:00, launchd fires the job on the next wake. If it was
+powered off, the occurrence is skipped and never runs. Neither loses work, because the
+window is computed from the last successful pass rather than from today — a hardcoded
+"today" would silently skip every night the machine slept through. To actually run at
+23:00: `sudo pmset repeat wakeorpoweron MTWRFSU 22:55:00`.
+
+### CLI
+
+```sh
+agent-memory stats                                   # corpus size, prose bytes, areas
+agent-memory memories --since 2026-10-13             # what a day produced
+agent-memory snapshot --out backup.db                # consistent copy of a live WAL db
+agent-memory curate --mode nightly [--dry-run]
+agent-memory canary [--save-baseline]
+agent-memory undo --run <id>
+agent-memory state [--get k] [--set k=v]
+```
+
 ## Database
 
-Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5). Three independent
-tables live there: `memories` (indexed by `memories_fts`), `session_log` (indexed by
-`session_log_fts`), and `rules` (no index — it is read in full, never searched).
+Data is stored at `~/.agent-memory/memory.db` (SQLite with FTS5), or wherever
+`AGENT_MEMORY_DIR` points. Three independent tables carry the content: `memories`
+(indexed by `memories_fts`), `session_log` (indexed by `session_log_fts`), and `rules`
+(no index — a dozen rows, read in full, never searched). The curator adds
+`memory_relations`, `memory_revisions`, `curation_runs`, `curation_actions`,
+`curation_state` and `curation_session`.
+
+### Timestamps are local
+
+**Every timestamp in this database is local time**, including a one-time backfill of
+rows written before that was true. Compare them directly — `date(created_at)`, not
+`date(created_at, 'localtime')`, which would shift an already-local value a second time.
+
+A store that mixes UTC and local is a trap with no good outcome: a comparison is either
+silently wrong for several hours a day, or correct only when every caller remembers a
+modifier that is invisible when it is missing. For an evening job the failure is total —
+once the UTC date rolls over, a query for "today" matches nothing written that evening,
+returns no rows, and reports success.
 
 ### Storage Setup
 
@@ -350,6 +579,14 @@ If you previously chose Google Drive:
 3. Run `npm run setup` and select Google Drive — it will find your existing data
 
 If Google Drive becomes unavailable (e.g. app not installed), the server automatically falls back to local storage instead of crashing.
+
+> **This fallback is destructive for an unattended job.** When `~/.agent-memory` is a
+> symlink whose target is not mounted, `resolveDataDir()` *unlinks the symlink* and
+> creates an empty directory in its place — so a scheduled run while the drive is
+> offline would destroy the only pointer to the real database and then operate on an
+> empty one. `scripts/run-curator.sh` therefore tests for this in shell before starting
+> any node process; `agent-memory stats` cannot be used for the check, because the CLI
+> opens the database to answer it and springs the trap itself.
 
 ### Manual Inspection
 
@@ -385,13 +622,25 @@ SELECT s.work_date, s.project, s.summary FROM session_log s
 
 ### Backup
 
-The database is a single file. Back it up however you prefer:
+**Do not `cp` the database.** It runs in WAL mode, so copying `memory.db` while the
+write-ahead log has uncommitted frames gives you a torn or stale file. Use:
 
 ```bash
-cp ~/.agent-memory/memory.db ~/.agent-memory/memory.db.bak
+agent-memory snapshot --out ~/backups/memory-$(date +%F).db
 ```
 
-Or add `~/.agent-memory/` to your backup tool (Time Machine, rsync, etc.).
+which is `VACUUM INTO` — a consistent copy of a live database. The curator takes one
+before every pass and keeps 14 days in `curator/state/snapshots/`.
+
+**Never run a bare `VACUUM` on the live file.** `id` is a `TEXT PRIMARY KEY`, so rowids
+are implicit and *not stable across a vacuum*, while `memories_fts` is an
+external-content index keyed on exactly those rowids. One vacuum silently scrambles
+every index-to-row mapping, searches start returning the wrong entries, and nothing
+reports it. If it ever happens:
+
+```sql
+INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+```
 
 ## Development
 
@@ -400,7 +649,20 @@ npm run dev          # Run with tsx (hot reload)
 npm run build        # Build with tsup
 npm run typecheck    # Type-check without emitting
 npm start            # Run the built version
+
+npm test             # All three suites below
+npm run test:curation  # Schema, guard triggers, archive round-trip, localtime window
+npm run test:surface   # Real MCP stdio handshake — catches a tool never registered
+npm run test:flow      # A full curation pass against a stubbed model
 ```
+
+There is no test runner; these are plain scripts that exit non-zero on the first
+failure. They all run against a throwaway `AGENT_MEMORY_DIR` and never touch the live
+store.
+
+After any `src/` change: **`npm run build` and restart your MCP client.** `dist/` is
+gitignored and clients are registered against `dist/index.js`, so the session that
+builds a new tool cannot call it.
 
 ## How Agents Should Use This
 

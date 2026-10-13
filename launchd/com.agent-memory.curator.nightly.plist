@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly memory curation, 23:00 local.
+
+  TEMPLATE. The __PROJECT_ROOT__ and __NODE_BIN__ tokens are substituted by
+  scripts/install-curator.sh; do not copy this file into LaunchAgents by hand.
+
+  Expect "nightly" to often mean "the next morning". A laptop asleep at 23:00 makes
+  launchd fire this on the next wake, and a machine that was powered off skips the
+  occurrence entirely. Neither case loses work: the pass computes its window from the
+  last successful run rather than from today, so a late or missed night is picked up
+  whenever it next runs.
+
+  XML forbids a double hyphen inside a comment, so there are none here.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agent-memory.curator.nightly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PROJECT_ROOT__/scripts/run-curator.sh</string>
+        <string>nightly</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>AGENT_MEMORY_NODE</key>
+        <string>__NODE_BIN__</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>23</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_ROOT__/curator/state/logs/nightly.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_ROOT__/curator/state/logs/nightly.launchd.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

@@ -1,17 +1,26 @@
 /**
- * Thin command-line face on the same storage the MCP tools use.
+ * Command-line face on the same storage the MCP tools use.
  *
- * It exists for one reason: a Claude Code hook is a shell command and cannot call
- * an MCP tool, so without this the hook would have to open memory.db and write its
- * own SQL — a second code path to the same rows, free to drift from the first.
- * Everything here goes through db.ts exactly as the tools do.
+ * Originally for one reason: a Claude Code hook is a shell command and cannot call an
+ * MCP tool, so without this the hook would open memory.db and write its own SQL — a
+ * second code path to the same rows, free to drift from the first. The curation
+ * commands are here for a second reason: a scheduled job should not depend on an MCP
+ * server at all. One spawned under launchd has been seen to die with CONNECTION_CLOSED
+ * while the identical invocation works from a terminal, and a nightly job that fails
+ * that way fails silently.
  *
- * It never fails loudly. A hook that errors is a hook that disrupts every session
- * start, so an unreadable database means no output and exit 0.
+ * Error handling differs by command on purpose. `rules` feeds a SessionStart hook, and
+ * a hook that errors disrupts every session, so it stays silent and exits 0. Every
+ * curation command exits non-zero and says why: a maintenance job that fails quietly
+ * is worse than one that does not run.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { getActiveRules } from "./db.js";
+import {
+  getActiveRules, getState, listMemories, memoryStats, revertRun, setState, snapshotTo,
+} from "./db.js";
+import { curate } from "./curation/run.js";
+import { diffCanaries, loadBaseline, loadCanaries, runCanaries, saveBaseline } from "./curation/canary.js";
 import type { RuleEntry } from "./types.js";
 
 type Format = "hook" | "markdown" | "json";
@@ -100,14 +109,198 @@ function formatMarkdown(rules: RuleEntry[]): string {
     .join("\n");
 }
 
+const USAGE = `agent-memory <command> [flags]
+
+  rules      [--project <name> | --cwd <path> | --hook-input] [--format hook|markdown|json]
+  stats      [--format json|text]
+  snapshot   --out <path>                       consistent copy of the live WAL database
+  memories   --since <YYYY-MM-DD> [--until <d>] [--format json|text]
+  curate     [--mode nightly|sweep] [--dry-run] [--home <dir>] [--claude-bin <path>]
+             [--model <name>] [--limit <n>]     one full curation pass
+  canary     [--file <path>] [--save-baseline]  pinned queries that prove retrieval still works
+  undo       --run <run_id>                     revert one curation run, column by column
+  state      [--get <key>] [--set <key>=<value>]
+
+Dates are LOCAL dates. The stored timestamps are UTC, so an evening run that compared
+against a UTC day would match nothing written that evening.`;
+
+/** Curation commands live beside the built CLI by default, so a clone works unmodified. */
+function curatorHome(flags: Record<string, string>): string {
+  if (flags.home) return resolve(flags.home);
+  if (process.env.AGENT_MEMORY_CURATOR_HOME) return resolve(process.env.AGENT_MEMORY_CURATOR_HOME);
+  return resolve(join(dirname(new URL(import.meta.url).pathname), "..", "curator"));
+}
+
+function runCuration(flags: Record<string, string>): number {
+  const home = curatorHome(flags);
+  const stateDir = join(home, "state");
+  mkdirSync(stateDir, { recursive: true });
+
+  // PROMPT.md is read from the state dir so a local edit is possible without touching
+  // the checkout; seed it from the versioned copy the first time.
+  const statePrompt = join(stateDir, "PROMPT.md");
+  if (!existsSync(statePrompt)) {
+    const shipped = join(home, "PROMPT.md");
+    if (!existsSync(shipped)) {
+      process.stderr.write(`agent-memory: no PROMPT.md at ${shipped}\n`);
+      return 1;
+    }
+    writeFileSync(statePrompt, readFileSync(shipped, "utf8"));
+  }
+
+  const result = curate({
+    mode: flags.mode === "sweep" ? "sweep" : "nightly",
+    stateDir,
+    reportDir: join(home, "reports"),
+    canariesFile: flags.canaries ? resolve(flags.canaries) : join(home, "canaries.json"),
+    claudeBin: flags["claude-bin"],
+    model: flags.model,
+    dryRun: "dry-run" in flags,
+    limit: flags.limit ? Number(flags.limit) : undefined,
+    log: (line) => process.stdout.write(`[curate] ${line}\n`),
+  });
+
+  process.stdout.write(`\n${result.headline}\n`);
+  if (result.reportPath) process.stdout.write(`report: ${result.reportPath}\n`);
+  // Exit 2 is "ran, but something needs a human" — distinct from 1, a real failure.
+  if (result.status === "failed") return 1;
+  if (result.status === "skipped") return 2;
+  return 0;
+}
+
+function runCanaryCommand(flags: Record<string, string>): number {
+  const file = flags.file ? resolve(flags.file) : join(curatorHome(flags), "canaries.json");
+  if (!existsSync(file)) {
+    process.stderr.write(`agent-memory: no canary file at ${file}\n`);
+    return 1;
+  }
+  const canaries = loadCanaries(file);
+  const current = runCanaries(canaries);
+
+  if ("save-baseline" in flags) {
+    saveBaseline(current);
+    process.stdout.write(`baseline saved for ${current.length} canaries\n`);
+    return 0;
+  }
+
+  const baseline = loadBaseline();
+  if (!baseline) {
+    saveBaseline(current);
+    process.stdout.write(`no baseline existed; captured one for ${current.length} canaries\n`);
+    return 0;
+  }
+
+  const diff = diffCanaries(baseline, current);
+  process.stdout.write(`${diff.stable}/${diff.total} canaries stable\n`);
+  for (const c of diff.changed) {
+    process.stdout.write(`  CHANGED ${c.name}\n    was [${c.was.join(", ")}]\n    now [${c.now.join(", ")}]\n`);
+  }
+  return diff.changed.length === 0 ? 0 : 2;
+}
+
 function main(): void {
   const { command, flags } = parseArgs(process.argv.slice(2));
 
-  if (command !== "rules") {
-    process.stderr.write(
-      "Usage: agent-memory rules [--project <name> | --cwd <path> | --hook-input] [--format hook|markdown|json]\n"
-    );
-    process.exit(command ? 1 : 0);
+  switch (command) {
+    case "":
+      process.stdout.write(`${USAGE}\n`);
+      process.exit(0);
+      break;
+
+    case "stats": {
+      const stats = memoryStats();
+      if (flags.format === "json") {
+        process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          `active ${stats.active} | archived ${stats.archived} | dirty ${stats.dirty} | `
+          + `${(stats.prose_bytes / 1024).toFixed(0)}KB prose across ${stats.areas} areas | `
+          + `${stats.oldest} .. ${stats.newest}\n`
+        );
+      }
+      process.exit(0);
+      break;
+    }
+
+    case "snapshot": {
+      if (!flags.out) {
+        process.stderr.write("agent-memory snapshot --out <path>\n");
+        process.exit(1);
+      }
+      const out = resolve(flags.out);
+      mkdirSync(dirname(out), { recursive: true });
+      snapshotTo(out);
+      process.stdout.write(`${out}\n`);
+      process.exit(0);
+      break;
+    }
+
+    case "memories": {
+      const rows = listMemories({
+        since: flags.since,
+        until: flags.until,
+        area: flags.area,
+        project: flags.project,
+        limit: flags.limit ? Number(flags.limit) : 500,
+        include_archived: "include-archived" in flags,
+      });
+      if (flags.format === "json") {
+        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+      } else {
+        for (const m of rows) {
+          process.stdout.write(`${m.updated_at.slice(0, 10)}  ${m.id}  ${m.type}/${m.severity}  ${m.title}\n`);
+        }
+        process.stdout.write(`\n${rows.length} memories\n`);
+      }
+      process.exit(0);
+      break;
+    }
+
+    case "curate":
+      process.exit(runCuration(flags));
+      break;
+
+    case "canary":
+      process.exit(runCanaryCommand(flags));
+      break;
+
+    case "undo": {
+      if (!flags.run) {
+        process.stderr.write("agent-memory undo --run <run_id>\n");
+        process.exit(1);
+      }
+      const { reverted, skipped } = revertRun(flags.run);
+      process.stdout.write(`reverted ${reverted.length} memories\n`);
+      for (const s of skipped) process.stdout.write(`  SKIPPED ${s.id}: ${s.why}\n`);
+      process.exit(0);
+      break;
+    }
+
+    case "state": {
+      if (flags.get) {
+        process.stdout.write(`${getState(flags.get) ?? ""}\n`);
+        process.exit(0);
+      }
+      if (flags.set) {
+        const eq = flags.set.indexOf("=");
+        if (eq < 0) {
+          process.stderr.write("agent-memory state --set <key>=<value>\n");
+          process.exit(1);
+        }
+        setState(flags.set.slice(0, eq), flags.set.slice(eq + 1));
+        process.exit(0);
+      }
+      process.stderr.write("agent-memory state [--get <key>] [--set <key>=<value>]\n");
+      process.exit(1);
+      break;
+    }
+
+    case "rules":
+      break;
+
+    default:
+      process.stderr.write(`${USAGE}\n`);
+      process.exit(1);
   }
 
   const cwd = flags.cwd || ("hook-input" in flags ? cwdFromStdin() : null);
@@ -129,5 +322,9 @@ try {
   main();
 } catch (error) {
   process.stderr.write(`agent-memory cli: ${error}\n`);
-  process.exit(0);
+  // `rules` must never disrupt a session start, so it swallows everything. Any other
+  // command is being run deliberately — usually by a scheduler — and a silent success
+  // after a failure is the worst outcome available.
+  const command = process.argv[2] ?? "";
+  process.exit(command === "rules" || command === "" ? 0 : 1);
 }

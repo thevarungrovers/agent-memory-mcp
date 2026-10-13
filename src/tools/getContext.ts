@@ -3,18 +3,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getActiveRules, getContextMemories } from "../db.js";
 import type { MemoryEntry, RuleEntry } from "../types.js";
 
-function formatEntry(entry: MemoryEntry): string {
-  const parts = [
-    `### [${entry.id}] ${entry.title}`,
-    `- **Type**: ${entry.type} | **Area**: ${entry.area} | **Severity**: ${entry.severity}`,
-  ];
-  if (entry.trigger_context) parts.push(`- **Trigger**: ${entry.trigger_context}`);
-  parts.push(`- **Symptom**: ${entry.symptom}`);
-  if (entry.root_cause) parts.push(`- **Root cause**: ${entry.root_cause}`);
-  parts.push(`- **Fix**: ${entry.fix}`);
-  if (entry.code_example) parts.push(`- **Code**:\n\`\`\`\n${entry.code_example}\n\`\`\``);
-  if (entry.tags) parts.push(`- **Tags**: ${entry.tags}`);
-  return parts.join("\n");
+const SNIPPET = 200;
+
+/**
+ * A projection, for the same reason search_memory returns one: this is the call
+ * CLAUDE.md tells every session to open with, and returning full bodies for twenty
+ * area matches plus ten FTS matches reliably exceeded the tool-output cap — at which
+ * point the task got no context at all. Load the index here, read the one that
+ * matters with get_memory.
+ */
+function formatProjection(entry: MemoryEntry): string {
+  const project = entry.project ? ` [${entry.project}]` : "";
+  const body = entry.symptom.replace(/\s+/g, " ").trim();
+  const snippet = body.length > SNIPPET ? `${body.slice(0, SNIPPET)}…` : body;
+  return `- **${entry.id}** (${entry.type}/${entry.severity}) ${entry.title}${project} — ${entry.area}\n  ${snippet}`;
 }
 
 /**
@@ -57,11 +59,12 @@ export function registerGetContext(server: McpServer): void {
       };
     }
 
-    const formatted = results.map(formatEntry).join("\n\n---\n\n");
+    const formatted = results.map(formatProjection).join("\n");
     return {
       content: [{
         type: "text",
-        text: `${rulesBlock}Found ${results.length} relevant memories for your current task:\n\n${formatted}`,
+        text: `${rulesBlock}Found ${results.length} relevant memories for your current task `
+          + `(call get_memory <id> for the full entry):\n\n${formatted}`,
       }],
     };
   });
