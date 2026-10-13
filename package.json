@@ -16,7 +16,8 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test:curation": "tsx tests/curation.test.ts"
+    "test:curation": "tsx tests/curation.test.ts",
+    "test:surface": "node tests/mcp-surface.test.mjs"
   },
   "keywords": [
     "mcp",
