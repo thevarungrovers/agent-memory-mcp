@@ -69,10 +69,25 @@ function fingerprintPreserved(before: MemoryEntry, after: MemoryEntry): boolean 
   return true;
 }
 
-export function applyDecisions(runId: string, decisions: Decision[]): ApplyOutcome {
+export function applyDecisions(runId: string, decisions: Decision[], dryRun = false): ApplyOutcome {
   const db = getDb();
   const outcome: ApplyOutcome = { applied: 0, proposed: 0, refused: 0, details: [] };
   let budget = archivesRemaining();
+
+  // A dry run records what WOULD have happened under its real verdict, rather than
+  // rewriting everything to PROPOSE — the point of a dry run is to see the judgement
+  // you are being asked to trust, and "PROPOSE" for all 25 tells you nothing.
+  if (dryRun) {
+    for (const d of decisions) {
+      recordCurationAction({
+        run_id: runId, memory_id: d.memory_id, verdict: d.verdict, tier: "proposed",
+        reason: d.reason ?? null, cites: d.cites ?? null, rationale: d.rationale,
+      });
+      outcome.proposed++;
+      outcome.details.push({ memory_id: d.memory_id, verdict: d.verdict, tier: "proposed", detail: "dry run" });
+    }
+    return outcome;
+  }
 
   const note = (d: Decision, tier: "applied" | "proposed" | "refused", detail: string): void => {
     outcome[tier === "applied" ? "applied" : tier === "proposed" ? "proposed" : "refused"]++;

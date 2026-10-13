@@ -228,9 +228,7 @@ export function curate(opts: CurateOptions): CurateResult {
   setCurationActor("curator", runId);
   let outcome;
   try {
-    outcome = opts.dryRun
-      ? applyDecisions(runId, decisions.map((d) => ({ ...d, verdict: "PROPOSE" as const })))
-      : applyDecisions(runId, decisions);
+    outcome = applyDecisions(runId, decisions, opts.dryRun);
   } finally {
     setCurationActor(null, null);
   }
@@ -242,6 +240,15 @@ export function curate(opts: CurateOptions): CurateResult {
 
   const failed = !ftsAfter.ok || !trailing.ok;
   const status = failed ? "failed" : "ok";
+
+  // Close the run BEFORE rendering: the report reads its status, and a report that
+  // says "running" is a report written about a run that had not finished.
+  finishCurationRun(runId, status, {
+    candidates: packet.clusters.length,
+    applied: outcome.applied,
+    proposed: outcome.proposed,
+    notes: failed ? (trailing.violations.join("; ") || ftsAfter.error || "invariant violation") : undefined,
+  });
 
   const { markdown, headline, notable } = renderReport({
     runId,
@@ -255,13 +262,6 @@ export function curate(opts: CurateOptions): CurateResult {
 
   const reportPath = join(opts.reportDir, `${localToday()}-${opts.mode}.md`);
   writeFileSync(reportPath, markdown);
-
-  finishCurationRun(runId, status, {
-    candidates: packet.clusters.length,
-    applied: outcome.applied,
-    proposed: outcome.proposed,
-    notes: failed ? (trailing.violations.join("; ") || ftsAfter.error || "invariant violation") : undefined,
-  });
 
   if (failed) {
     // The watermark is deliberately NOT advanced, so the same window is reconsidered
