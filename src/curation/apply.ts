@@ -115,7 +115,18 @@ export function applyDecisions(runId: string, decisions: Decision[], opts: Apply
 
     // One transaction per decision, with the ledger row written inside it. A crash can
     // never leave an action applied but unrecorded, or recorded but not applied.
+    //
+    // The curator identity is claimed INSIDE this transaction and released with it,
+    // rather than held for the length of the run. curation_session is a single global
+    // row in a database every process shares, so a long-held claim tags every other
+    // writer as the curator: their edits get attributed to this run — which would make
+    // `undo --run` revert a real session's work — and they get judged by guard triggers
+    // meant only for this one. SQLite allows a single writer at a time, so a BEGIN
+    // IMMEDIATE transaction that claims, writes and releases cannot interleave with
+    // another process's write, and the window closes from ninety minutes to one
+    // statement. A rollback reverts the claim too.
     const run = db.transaction(() => {
+      db.prepare("UPDATE curation_session SET actor = 'curator', run_id = ? WHERE id = 1").run(runId);
       switch (d.verdict) {
         case "KEEP": {
           markCurated(d.memory_id);
@@ -218,7 +229,7 @@ export function applyDecisions(runId: string, decisions: Decision[], opts: Apply
     });
 
     try {
-      run();
+      run.immediate();
     } catch (error) {
       // A guard trigger fired, or a post-edit invariant failed. The transaction rolled
       // back, so the refusal is the whole outcome for this decision.
@@ -228,7 +239,13 @@ export function applyDecisions(runId: string, decisions: Decision[], opts: Apply
     }
   }
 
+  releaseCurationActor();
   return outcome;
+}
+
+/** Belt and braces: a rollback already reverts the claim, but never leave it set. */
+function releaseCurationActor(): void {
+  getDb().prepare("UPDATE curation_session SET actor = NULL, run_id = NULL WHERE id = 1").run();
 }
 
 // ---- Trailing-window invariants. A per-run cap cannot see slow erosion: three

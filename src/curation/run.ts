@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import {
   curationCoverage, finishCurationRun, ftsIntegrityCheck, getState, listAreas, markCurated,
-  memoryStats, setCurationActor, setState, snapshotTo, startCurationRun,
+  memoryStats, setState, snapshotTo, startCurationRun,
 } from "../db.js";
 import { applyDecisions, archivesRemaining, checkTrailingInvariants, recordStatsPoint } from "./apply.js";
 import { buildPacket } from "./candidates.js";
@@ -246,14 +246,9 @@ export function curate(opts: CurateOptions): CurateResult {
   const decisions = asked.decisions;
   log(`${decisions.length} decisions`);
 
-  // Everything below runs as 'curator', which arms the guard triggers.
-  setCurationActor("curator", runId);
-  let outcome;
-  try {
-    outcome = applyDecisions(runId, decisions, { dryRun: opts.dryRun });
-  } finally {
-    setCurationActor(null, null);
-  }
+  // The curator identity is claimed per write inside applyDecisions, not held across
+  // the run — see the note there on why a long-held claim corrupts other processes.
+  const outcome = applyDecisions(runId, decisions, { dryRun: opts.dryRun });
   log(`applied ${outcome.applied}, proposed ${outcome.proposed}, refused ${outcome.refused}`);
 
   const ftsAfter = ftsIntegrityCheck();
@@ -361,8 +356,7 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
   let modelError: string | null = null;
   const expected = Math.ceil(start.remaining / batchSize);
 
-  setCurationActor("curator", runId);
-  try {
+  {
     while (true) {
       if (opts.maxBatches && batch >= opts.maxBatches) {
         log(`stopping after ${batch} batches as asked`);
@@ -413,8 +407,6 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
       const left = curationCoverage().remaining;
       log(`batch ${batch}/${expected}: ${ids.length} entries, ${outcome.applied} applied, ${outcome.proposed} proposed — ${left} left`);
     }
-  } finally {
-    setCurationActor(null, null);
   }
 
   const ftsAfter = ftsIntegrityCheck();

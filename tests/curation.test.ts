@@ -191,6 +191,33 @@ ok("the ledger records the action", db.getCurationActions(runId).length === 1);
 db.finishCurationRun(runId, "ok", { candidates: 1, applied: 1, proposed: 0 });
 ok("the run closes", db.getCurationRun(runId)?.status === "ok");
 
+process.stdout.write("\ncurator claim is scoped to a write, not a run\n");
+{
+  const { applyDecisions } = await import("../src/curation/apply.js");
+  const target = newMemory({ title: "claim scope test" });
+  const runId2 = db.startCurationRun("nightly", null, null);
+
+  ok("no claim is held before applying", db.getCurationActor().actor === null);
+  applyDecisions(runId2, [{ memory_id: target, verdict: "KEEP", rationale: "x" }]);
+  // The claim must not outlive the write. Held across a whole run it would tag every
+  // other process writing to this shared database as the curator: their edits land in
+  // this run's revision history, so `undo --run` reverts a real session's work, and
+  // they get judged by triggers meant only for the curator.
+  ok("no claim is left behind after applying", db.getCurationActor().actor === null);
+
+  // A write from "another process" while no claim is held must be unguarded and
+  // unattributed, even though a curation run is open.
+  db.updateMemory(target, { symptom: "a completely rewritten symptom from another session" });
+  ok(
+    "a concurrent session may still rewrite symptom freely",
+    db.getMemoryById(target)!.symptom.startsWith("a completely rewritten")
+  );
+  const stray = db
+    .getRevisionsForRun(runId2)
+    .filter((r) => r.column_name === "symptom");
+  ok("...and its edit is NOT attributed to the curation run", stray.length === 0);
+}
+
 process.stdout.write("\nerosion guard\n");
 {
   const { checkTrailingInvariants, recordStatsPoint } = await import("../src/curation/apply.js");
