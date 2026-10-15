@@ -91,9 +91,14 @@ export function computeWindow(): { from: string; to: string } {
 }
 
 function buildPrompt(packetPath: string, decisionsPath: string, promptTemplate: string): string {
+  // Every occurrence, not the first. String.replace with a string pattern substitutes
+  // once, and PROMPT.md names {{DECISIONS_PATH}} twice — once where the file is
+  // introduced and again in the "write exactly this shape to" instruction at the end.
+  // The second was reaching the model as a literal placeholder, which is an invitation
+  // to create a file called {{DECISIONS_PATH}} and fail the run for want of decisions.
   return promptTemplate
-    .replace("{{PACKET_PATH}}", packetPath)
-    .replace("{{DECISIONS_PATH}}", decisionsPath);
+    .split("{{PACKET_PATH}}").join(packetPath)
+    .split("{{DECISIONS_PATH}}").join(decisionsPath);
 }
 
 
