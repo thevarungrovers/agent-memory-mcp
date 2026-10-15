@@ -65,11 +65,20 @@ notify() {
   text="$(printf '%s' "$text" | head -c 1800)"
   text="$(printf '%s' "$text" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || printf '%s' "$text")"
 
-  curl -sS -m 20 -o /dev/null -X POST "$CURATOR_DISCORD_WEBHOOK" \
+  # -w the status, because curl without --fail exits 0 on an HTTP error: a revoked or
+  # mistyped webhook returns 401/404 and would otherwise look exactly like a delivered
+  # message. Discord answers 204 on success. Never --fail itself, which would discard
+  # the body that says WHY it was rejected.
+  local code
+  code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST "$CURATOR_DISCORD_WEBHOOK" \
     -H 'Content-Type: application/json' \
     -H 'User-Agent: AgentMemoryCurator/1.0 (+local)' \
-    --data "{\"username\":\"agent-memory curator\",\"content\":\"$(json_escape "$text")\"}" \
-    || log "notify failed (the run itself is unaffected)"
+    --data "{\"username\":\"agent-memory curator\",\"content\":\"$(json_escape "$text")\"}")"
+  case "$code" in
+    2*) log "notified Discord ($code)" ;;
+    "") log "notify failed: no response from Discord (the run itself is unaffected)" ;;
+    *)  log "notify failed: Discord returned HTTP $code — check CURATOR_DISCORD_WEBHOOK (the run itself is unaffected)" ;;
+  esac
 }
 
 # A preflight that cannot continue. Always announced: a scheduled job that silently
