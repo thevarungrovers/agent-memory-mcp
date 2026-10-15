@@ -158,6 +158,17 @@ const reportPath = join(home, "reports");
 const reports = existsSync(reportPath) ? readFileSync(join(reportPath, `${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)}-nightly.md`), "utf8") : "";
 ok("a report was written", reports.length > 0);
 ok("the report names the proposals", reports.includes("Proposals"));
+// The report's reason to exist once the curator applies its own decisions: a section
+// that says what it did to the corpus, in terms of the effect and not just the verdict.
+ok("the report has a 'what changed' section", reports.includes("## What changed"));
+ok("...naming the concrete effect, not just the verdict", reports.includes("archived in favour of"));
+ok("...and the retag's new tag list", reports.includes("tags -> gh,repo,git,gh-resolved"));
+ok(
+  "a KEEP is not counted as a change",
+  reports.includes("2 changed, 1 archived") && !/^- \*\*KEEP\*\*/m.test(
+    reports.slice(reports.indexOf("## What changed"), reports.indexOf("## Proposals"))
+  )
+);
 ok("the report carries an undo command", reports.includes("agent-memory undo --run"));
 ok("report counts come from the ledger, not the model", reports.includes("1 archived"));
 
