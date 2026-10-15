@@ -18,7 +18,7 @@ It stores bugs, patterns, gotchas, and learnings across all projects and session
 Call `get_context` with the tech areas you will work in:
 
 ```
-get_context({ areas: ["php", "mysql"], project: "lufa-yii2", task_description: "migrating order controller" })
+get_context({ areas: ["php", "mysql"], project: "example-app", task_description: "migrating order controller" })
 ```
 
 Review the returned memories before writing any code.
@@ -92,7 +92,7 @@ of what happened. Log every session, including ones that produced no memory at a
 ```
 store_session_log({
   summary: "Migrated the order controller to Yii2 and fixed the vite manifest path",
-  project: "lufa-development-yii2",
+  project: "example-app",
   tags: "yii2,vite,orders"
 })
 ```
@@ -104,7 +104,7 @@ Call `search_session_log` instead of guessing from git history:
 ```
 search_session_log({ query: "vite manifest" })                      // when did I work on X?
 search_session_log({ from: "2026-09-01", to: "2026-09-07" })        // what did I do last week?
-search_session_log({ query: "orders", project: "lufa-development-yii2" })
+search_session_log({ query: "orders", project: "example-app" })
 ```
 
 Results come back grouped by date, newest first.
