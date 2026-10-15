@@ -424,15 +424,49 @@ Installing does not run anything — `RunAtLoad` is false, so the first pass is 
 bash scripts/run-curator.sh nightly
 ```
 
-### Start with dry runs
+### Dry runs
 
 ```sh
 CURATOR_EXTRA_ARGS=--dry-run bash scripts/run-curator.sh nightly
 ```
 
-Every decision is recorded as a proposal and nothing is changed. Read a week of reports
-in `curator/reports/` before trusting it unattended. They cost nothing if its judgement
-turns out to be poor, which is the entire point of looking.
+Every decision is recorded as a proposal and nothing is changed. Read a few reports in
+`curator/reports/` this way before trusting a new install unattended — they cost nothing
+if its judgement turns out to be poor, which is the entire point of looking.
+
+Leaving `--dry-run` in `curator/config.env` permanently is a trap worth naming: a dry
+pass still exits 0 and still reports `ok`, so the only thing distinguishing it from a
+working installation is the scorecard reading `0 changed, N to review`. If the corpus
+never changes, check there first.
+
+### What it changed
+
+The report's first section after the red flags is **What changed**, and it is the
+section the rest exists to support. It lists only the verdicts that left a row different
+from how they found it, with the effect rather than the verdict — `archived in favour of
+<id>`, `tags -> a,b,c` — and says "Nothing." outright on the nights nothing moved. The
+entries it read and found correct are counted separately and collapsed; they are not
+changes and do not belong in the same list.
+
+### Notifications (optional)
+
+Set a Discord webhook in `curator/config.env` and every run reports itself: the summary
+line, what it changed, any red flags, and the path to the full report.
+
+```sh
+CURATOR_DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+CURATOR_NOTIFY_LEVEL=all        # all (default) | changes | errors | off
+```
+
+With no webhook set, every notification is a silent no-op — nothing warns, nothing
+fails. Failures are announced whatever the level is set to, including the preflight ones
+that happen before node is involved. `changes` drops the nights where nothing moved,
+which is the setting to reach for when a nightly "nothing happened" has stopped being
+read.
+
+Values in `config.env` are sourced by bash, so quote anything containing a space:
+`CURATOR_EXTRA_ARGS="--limit 10"`, never `CURATOR_EXTRA_ARGS=--limit 10` — unquoted,
+bash runs the rest of the line as a command.
 
 ### How a pass works
 
@@ -445,7 +479,8 @@ turns out to be poor, which is the entire point of looking.
    any kind*. It reads the packet, writes decisions as JSON.
 5. **Apply** — every claim the model makes is re-derived before it is acted on.
 6. **Verify** — FTS integrity, trailing-window invariants, and the canary set.
-7. **Report** — `curator/reports/<date>-<mode>.md`, generated from the ledger.
+7. **Report** — `curator/reports/<date>-<mode>.md`, generated from the ledger, and
+   posted to Discord if a webhook is configured.
 
 The model never touches the database. That shape is doing three jobs: a nightly job
 should not depend on an MCP server (one spawned under launchd has been seen to die with

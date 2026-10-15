@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  curationCoverage, finishCurationRun, ftsIntegrityCheck, getState, listAreas, markCurated,
+  curationCoverage, finishCurationRun, ftsIntegrityCheck, getState, markCurated,
   memoryStats, setState, snapshotTo, startCurationRun,
 } from "../db.js";
 import { applyDecisions, archivesRemaining, checkTrailingInvariants, recordStatsPoint } from "./apply.js";
@@ -91,9 +91,14 @@ export function computeWindow(): { from: string; to: string } {
 }
 
 function buildPrompt(packetPath: string, decisionsPath: string, promptTemplate: string): string {
+  // Every occurrence, not the first. String.replace with a string pattern substitutes
+  // once, and PROMPT.md names {{DECISIONS_PATH}} twice — once where the file is
+  // introduced and again in the "write exactly this shape to" instruction at the end.
+  // The second was reaching the model as a literal placeholder, which is an invitation
+  // to create a file called {{DECISIONS_PATH}} and fail the run for want of decisions.
   return promptTemplate
-    .replace("{{PACKET_PATH}}", packetPath)
-    .replace("{{DECISIONS_PATH}}", decisionsPath);
+    .split("{{PACKET_PATH}}").join(packetPath)
+    .split("{{DECISIONS_PATH}}").join(decisionsPath);
 }
 
 
@@ -199,15 +204,15 @@ export function curate(opts: CurateOptions): CurateResult {
     log(`canary baseline captured (${baseline.length} queries)`);
   }
 
-  const areas = opts.mode === "sweep" ? listAreas() : [];
-  const sweepArea = opts.mode === "sweep" ? pickSweepArea(areas.map((a) => a.area)) : undefined;
-  if (sweepArea) log(`sweep area: ${sweepArea}`);
-
+  // No area is chosen here. A sweep walks the whole corpus ordered by staleness —
+  // see buildPacket, which ignores `area` for exactly the reason the round-robin was
+  // removed: picking one area per run left the rows below each area's cap unreachable
+  // forever, and the log line announcing the area was describing a filter that was
+  // not being applied.
   const packet = buildPacket({
     mode: opts.mode,
     since: opts.mode === "nightly" ? from : undefined,
     until: opts.mode === "nightly" ? to : undefined,
-    area: sweepArea,
     limit: opts.limit,
     archivesRemaining: archivesRemaining(),
   });
@@ -272,9 +277,7 @@ export function curate(opts: CurateOptions): CurateResult {
     canaries: canaryDiff,
     before: { active: before.active, prose_bytes: before.prose_bytes },
     ftsOk: ftsAfter.ok,
-    proposals: outcome.details
-      .filter((d) => d.tier === "proposed")
-      .map((d) => ({ memory_id: d.memory_id, verdict: d.verdict, detail: d.detail, rationale: null })),
+    details: outcome.details,
   });
 
   const reportPath = join(opts.reportDir, `${localToday()}-${opts.mode}.md`);
@@ -291,16 +294,6 @@ export function curate(opts: CurateOptions): CurateResult {
   recordStatsPoint();
 
   return { runId, status, headline, reportPath, notable: notable || failed };
-}
-
-/** Round-robin through areas so a weekly sweep eventually covers all of them. */
-function pickSweepArea(areas: string[]): string | undefined {
-  if (areas.length === 0) return undefined;
-  const last = getState("sweep_last_area");
-  const idx = last ? areas.indexOf(last) : -1;
-  const next = areas[(idx + 1) % areas.length];
-  setState("sweep_last_area", next);
-  return next;
 }
 
 /**
@@ -352,6 +345,8 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
 
   const promptTemplate = readFileSync(join(opts.stateDir, "PROMPT.md"), "utf8");
   let totals = { applied: 0, proposed: 0, refused: 0, seen: 0 };
+  // Across every batch, not just the last one — the report is rendered once at the end.
+  const allDetails: { memory_id: string; verdict: string; detail: string; tier: string }[] = [];
   let batch = 0;
   let modelError: string | null = null;
   const expected = Math.ceil(start.remaining / batchSize);
@@ -399,6 +394,7 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
       // for, or the loop would re-select them forever.
       for (const id of ids) markCurated(id);
 
+      allDetails.push(...outcome.details);
       totals.applied += outcome.applied;
       totals.proposed += outcome.proposed;
       totals.refused += outcome.refused;
@@ -426,7 +422,7 @@ export function backfill(opts: CurateOptions & { batchSize?: number; maxBatches?
     canaries: canaryDiff,
     before: { active: before.active, prose_bytes: before.prose_bytes },
     ftsOk: ftsAfter.ok,
-    proposals: [],
+    details: allDetails,
   });
 
   const reportPath = join(opts.reportDir, `${localToday()}-backfill.md`);
