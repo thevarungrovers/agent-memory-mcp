@@ -107,7 +107,13 @@ export function renderReport(opts: {
   // stated, not inferred from a missing heading.
   lines.push("## What changed");
   lines.push("");
-  if (changed.length === 0) {
+  if (changed.length === 0 && kept.length === 0 && proposed.length > 0) {
+    // A dry run lands here: every decision was recorded under its real verdict but
+    // nothing was applied, so "0 entries were reviewed" would be both true and
+    // thoroughly misleading with a page of proposals underneath it.
+    lines.push(`Nothing was applied. All ${proposed.length} decisions below are proposals.`);
+    lines.push("");
+  } else if (changed.length === 0) {
     lines.push(`Nothing. ${kept.length} ${kept.length === 1 ? "entry was" : "entries were"} reviewed and left exactly as they were.`);
     lines.push("");
   } else {
