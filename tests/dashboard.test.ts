@@ -1,0 +1,202 @@
+/**
+ * The dashboard's model and every button behind it, against a throwaway store — plus a
+ * real HTTP round trip, because the token and Host checks are the only thing standing
+ * between a website open in the same browser and an archive button.
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+const dir = mkdtempSync(join(tmpdir(), "agent-memory-dash-"));
+process.env.AGENT_MEMORY_DIR = dir;
+
+const db = await import("../src/db.js");
+const { act } = await import("../src/dashboard/actions.js");
+const { buildOverview, buildDecisions } = await import("../src/dashboard/model.js");
+const { planRepair } = await import("../src/dashboard/repair.js");
+const { startDashboard } = await import("../src/dashboard/server.js");
+
+let passed = 0;
+function ok(label: string, cond: boolean): void {
+  if (!cond) throw new Error(`FAIL: ${label}`);
+  passed++;
+  process.stdout.write(`  ok  ${label}\n`);
+}
+
+function mk(title: string, over: Partial<db.NewMemory> = {}): string {
+  const id = randomUUID();
+  db.insertMemory({
+    id, title, type: "gotcha", project: null, area: "git", trigger_context: null,
+    symptom: `${title} symptom`, root_cause: null, fix: "fix", code_example: null, tags: "t", severity: "major", ...over,
+  });
+  return id;
+}
+const ctx = { canariesFile: null };
+
+const dup = mk("duplicate entry");
+const survivor = mk("surviving entry");
+const consolidate = mk("one of eight");
+const relA = mk("relate a");
+const relB = mk("relate b");
+const kept = mk("kept");
+const kept2 = mk("kept with an explanation");
+
+// Two nights asking the same thing, plus one of each other shape.
+const night1 = db.startCurationRun("nightly", "2026-10-19", "2026-10-19");
+const night2 = db.startCurationRun("nightly", "2026-10-20", "2026-10-20");
+db.recordCurationAction({ run_id: night1, memory_id: dup, verdict: "ARCHIVE", tier: "proposed", reason: "duplicate_of", cites: survivor, rationale: "same" });
+db.recordCurationAction({ run_id: night2, memory_id: dup, verdict: "ARCHIVE", tier: "proposed", reason: "duplicate_of", cites: survivor, rationale: "same again" });
+db.recordCurationAction({ run_id: night2, memory_id: consolidate, verdict: "PROPOSE", tier: "proposed", rationale: `Same gotcha stored three times (${dup}). Propose consolidating onto ${survivor.slice(0, 8)} as the canonical entry.` });
+db.recordCurationAction({ run_id: night2, memory_id: kept2, verdict: "PROPOSE", tier: "proposed", rationale: "Dated deprecation with the exact 401/403 discrimination; nothing else covers it." });
+db.recordCurationAction({ run_id: night1, memory_id: relA, verdict: "RELATE", tier: "proposed", cites: relB, rationale: "siblings" });
+db.recordCurationAction({ run_id: night1, memory_id: kept, verdict: "KEEP", tier: "proposed", rationale: "fine" });
+db.recordCurationAction({ run_id: night1, memory_id: kept, verdict: "RETAG", tier: "proposed", rationale: "add a tag" });
+db.finishCurationRun(night1, "ok", {});
+db.finishCurationRun(night2, "ok", {});
+
+process.stdout.write("\nproposal queue, grouped by the job\n");
+let q = buildDecisions();
+const dupCard = q.sections.duplicate[0];
+ok("a duplicate asked on two nights is one card", q.sections.duplicate.length === 1 && dupCard.action_ids.length === 2);
+ok("...that says it was raised on two nights", dupCard.times === 2);
+ok("...and says why it is asking", /overlap|limit|backlog|stale/i.test(dupCard.why));
+ok("dry-run KEEP and RETAG are leftovers, not decisions", q.dryrun.length === 2);
+const mergeCard = q.sections.merge[0];
+ok("a consolidation note becomes a merge card", Boolean(mergeCard) && mergeCard.entries.length === 3);
+ok("...that suggests the entry to keep", mergeCard.suggested_main === survivor);
+ok("a note that asks for nothing is an explanation", q.explain.some((g) => g.memory?.id === kept2));
+
+process.stdout.write("\nanswering\n");
+let r = act("proposal.archive", { ids: dupCard.action_ids, memory_id: dup, reason: "duplicate_of", cites: survivor }, ctx);
+ok("archive in favour of the cited entry", r.ok);
+ok("the row is archived and points at its survivor", db.getMemoryById(dup)?.archived_at !== null && db.getMemoryById(dup)?.superseded_by === survivor);
+ok("a duplicate_of link was drawn", db.getRelations(dup).some((x) => x.kind === "duplicate_of" && x.from_id === survivor));
+ok("both nights' proposals are answered", dupCard.action_ids.every((id) => db.getCurationAction(id)?.resolution === "applied"));
+ok("the second click fails cleanly", !act("proposal.archive", { ids: dupCard.action_ids, memory_id: dup, reason: "duplicate_of", cites: survivor }, ctx).ok);
+ok("archiving needs a replacement for duplicate_of", !act("memory.archive", { memory_id: kept, reason: "duplicate_of" }, ctx).ok);
+
+ok("a link is queued, not put to you as a decision", buildDecisions().sections.link.length === 0 && buildDecisions().queuedLinks.length === 1);
+{
+  const { settleLinkProposals } = await import("../src/curation/apply.js");
+  const linkRun = db.startCurationRun("nightly", null, null);
+  const settled = settleLinkProposals(linkRun);
+  db.finishCurationRun(linkRun, "ok", {});
+  ok("the next run applies it without asking", settled.linked === 1 && db.getRelations(relA).some((x) => x.to_id === relB && x.created_by === "curator"));
+  ok("...records it as this run's change, so it can be undone", db.getCurationActions(linkRun).some((a) => a.verdict === "RELATE" && a.tier === "applied"));
+  ok("...and the queue is empty", buildDecisions().queuedLinks.length === 0);
+  ok("settling again does nothing", settleLinkProposals(linkRun).linked === 0);
+}
+
+const m2 = buildDecisions().sections.merge[0];
+r = act("merge.apply", { ids: m2.action_ids, main: survivor, others: [consolidate], mode: "supersede" }, ctx);
+ok("merge marks the folded entry replaced by the main one", r.ok && db.getMemoryById(consolidate)?.superseded_by === survivor);
+ok("...and leaves it searchable", db.getMemoryById(consolidate)?.archived_at === null);
+ok("merge with nothing ticked is refused", !act("merge.apply", { ids: ["x"], main: survivor, others: [] }, ctx).ok);
+
+q = buildDecisions();
+ok("the decision queue is empty", q.total === 0);
+ok("a failed action leaves nothing half-done", !act("proposal.archive", { ids: ["nope"], memory_id: "missing" }, ctx).ok);
+
+process.stdout.write("\nrepairing entries saved broken\n");
+{
+  const leakedFix = "Pass --repo.</fix>\n<root_cause>The default repo lives in .git/config.</root_cause>\n<tags>gh,repo</tags>\n</invoke>\n";
+  const broken = mk("broken entry", { fix: leakedFix, tags: null as unknown as string });
+  const quoting = mk("documents the bug", { symptom: 'a value like <parameter name="x"> is swallowed </summary>' });
+  const conflicted = mk("conflicted", { fix: "do x</fix>\n<root_cause>new cause</root_cause>", root_cause: "old cause" });
+  const damaged = db.listDamagedMemories().map((d) => d.id);
+  ok("an entry with a field's own closing tag is found", damaged.includes(broken));
+  ok("an entry that merely quotes the markup is not", !damaged.includes(quoting));
+  const plan = planRepair(db.getMemoryById(broken)!);
+  ok("the plan moves the spilled text into its own fields", plan.changes.fix?.after === "Pass --repo." && plan.changes.root_cause?.after === "The default repo lives in .git/config." && plan.changes.tags?.after === "gh,repo");
+  ok("a conflict is left for a human", planRepair(db.getMemoryById(conflicted)!).manual !== null);
+  ok("repair all fixes what it safely can", act("repair.applyAll", {}, ctx).ok);
+  ok("...the row is clean", db.getMemoryById(broken)?.fix === "Pass --repo." && db.getMemoryById(broken)?.root_cause === "The default repo lives in .git/config.");
+  ok("...and the conflict was not touched", db.getMemoryById(conflicted)?.root_cause === "old cause");
+  ok("...and the change is undoable from revision history", (db.getDb().prepare("SELECT COUNT(*) n FROM memory_revisions WHERE memory_id = ? AND column_name = 'fix'").get(broken) as { n: number }).n === 1);
+  act("memory.archive", { memory_id: conflicted, reason: "no_longer_relevant" }, ctx);
+}
+
+process.stdout.write("\na dismissed question stays answered\n");
+{
+  const asked = mk("asked about");
+  const night3 = db.startCurationRun("sweep", null, null);
+  const first = db.recordCurationAction({ run_id: night3, memory_id: asked, verdict: "PROPOSE", tier: "proposed", rationale: "propose a human splits this", ask: "Split it in two." });
+  ok("a proposal with an ask is a decision", buildDecisions().sections.other.some((c) => c.headline === "Split it in two."));
+  act("proposal.dismiss", { ids: [first] }, ctx);
+  const again = db.recordCurationAction({ run_id: night3, memory_id: asked, verdict: "PROPOSE", tier: "proposed", rationale: "propose a human splits this, again" });
+  ok("re-asking it is answered on arrival", db.getCurationAction(again)?.resolution === "dismissed");
+  ok("...so the queue stays empty", buildDecisions().total === 0);
+  // Timestamps have one-second resolution; a real edit comes long after the dismissal.
+  await new Promise((r) => setTimeout(r, 1100));
+  db.updateMemory(asked, { fix: "a human rewrote the fix" });
+  const third = db.recordCurationAction({ run_id: night3, memory_id: asked, verdict: "PROPOSE", tier: "proposed", rationale: "propose a split, after the edit" });
+  ok("once the row is edited, the question is fair to ask again", db.getCurationAction(third)?.resolved_at === null);
+  act("proposal.dismiss", { ids: [third] }, ctx);
+  db.finishCurationRun(night3, "ok", {});
+}
+
+process.stdout.write("\nundoing what the curator applied\n");
+{
+  const { applyDecisions } = await import("../src/curation/apply.js");
+  const a = mk("applied target");
+  const b = mk("applied cited");
+  const run = db.startCurationRun("nightly", null, null);
+  applyDecisions(run, [
+    { memory_id: a, verdict: "RETAG", tags: "t,extra", rationale: "add extra" },
+    { memory_id: b, verdict: "RELATE", cites: a, rationale: "related" },
+  ]);
+  db.finishCurationRun(run, "ok", {});
+  const changes = buildOverview(null).changes;
+  const retag = changes.find((c) => c.verdict === "RETAG")!;
+  const relate = changes.find((c) => c.verdict === "RELATE")!;
+  ok("recent changes lists what the curator did", Boolean(retag && relate));
+  ok("undo a retag", act("change.undo", { action_id: retag.action_id }, ctx).ok && db.getMemoryById(a)?.tags === "t");
+  ok("undo a link removes it", act("change.undo", { action_id: relate.action_id }, ctx).ok
+    && !db.getRelations(b).some((x) => x.created_by === "curator"));
+  ok("an undone change cannot be undone twice", !act("change.undo", { action_id: retag.action_id }, ctx).ok);
+  ok("...and is shown as undone", buildOverview(null).changes.find((c) => c.action_id === retag.action_id)?.undone === true);
+}
+
+process.stdout.write("\nneeds attention\n");
+db.setState("last_run_failed", "1");
+ok("a set latch is the top item", buildOverview(null).attention[0]?.key === "latch");
+ok("one click clears it", act("state.clearLatch", {}, ctx).ok && db.getState("last_run_failed") === "0");
+db.setCurationActor("curator", "x");
+ok("a stuck guard claim is flagged", buildOverview(null).attention.some((a) => a.key === "actor"));
+act("state.releaseActor", {}, ctx);
+ok("...and released", db.getCurationActor().actor === null);
+
+process.stdout.write("\npage script\n");
+{
+  // tsc never sees the page's inline script, so a stray bracket ships as a page stuck
+  // on "Loading…". Parse it here instead.
+  const { readFileSync } = await import("node:fs");
+  const html = readFileSync(join(import.meta.dirname, "..", "src", "dashboard", "page.html"), "utf8");
+  const script = /<script>([\s\S]*)<\/script>/.exec(html)?.[1] ?? "";
+  let parsed = true;
+  try { new Function(script); } catch (error) { parsed = false; process.stdout.write(`    ${error}\n`); }
+  ok("the page's script parses", script.length > 0 && parsed);
+}
+
+process.stdout.write("\nhttp\n");
+{
+  const port = 4790 + Math.floor(Math.random() * 9);
+  const server = await startDashboard({ port, canariesFile: null });
+  const base = `http://127.0.0.1:${port}`;
+  const page = await (await fetch(`${base}/`)).text();
+  const token = /const TOKEN = "([0-9a-f]+)"/.exec(page)?.[1] ?? "";
+  ok("the page carries a token", token.length === 48);
+  ok("an API call without it is refused", (await fetch(`${base}/api/overview`)).status === 401);
+  const post = await fetch(`${base}/api/act`, {
+    method: "POST", body: JSON.stringify({ action: "state.clearLatch" }),
+    headers: { "x-dashboard-token": token, "content-type": "text/plain" },
+  });
+  ok("a non-JSON POST is refused", post.status === 415);
+  const overview = await fetch(`${base}/api/overview`, { headers: { "x-dashboard-token": token } });
+  ok("with it, the overview loads", overview.status === 200 && Array.isArray((await overview.json()).runs));
+  server.close();
+}
+
+rmSync(dir, { recursive: true, force: true });
+process.stdout.write(`\n${passed} checks passed\n`);

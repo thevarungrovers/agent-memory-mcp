@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Curator</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6862; --line: #e4e1db;
+  --accent: #2f5bd3; --accent-ink: #ffffff; --soft: #eef1fb;
+  --crit: #b4261d; --crit-soft: #fbeceb; --warn: #9a5b00; --warn-soft: #fdf3e2;
+  --info: #3b5b7a; --info-soft: #eaf1f7; --ok: #23753f; --ok-soft: #e7f4ec;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 8px rgba(0,0,0,.04);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413; --panel: #1d1c1b; --ink: #ecebe8; --muted: #a09d97; --line: #33312e;
+    --accent: #7c9cff; --accent-ink: #0d1020; --soft: #222838;
+    --crit: #ff8a80; --crit-soft: #3a1f1d; --warn: #f0b85a; --warn-soft: #362a17;
+    --info: #9cc0e0; --info-soft: #1d2a36; --ok: #79d29a; --ok-soft: #1a2e22;
+    --shadow: none; color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+a { color: var(--accent); }
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+.top { display: flex; align-items: center; gap: 16px; padding: 14px 0 10px; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+.stats { display: flex; gap: 14px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+.stats b { color: var(--ink); font-weight: 600; }
+.spacer { flex: 1; }
+nav { display: flex; gap: 2px; overflow-x: auto; }
+nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; color: var(--muted);
+  font: inherit; font-weight: 550; cursor: pointer; white-space: nowrap; }
+nav button.on { color: var(--ink); border-bottom-color: var(--ink); }
+nav .n { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 6px; border-radius: 10px;
+  background: var(--line); color: var(--ink); font-size: 12px; text-align: center; }
+nav .n.hot { background: var(--crit); color: #fff; }
+main { padding: 20px 0 80px; }
+.lead { color: var(--muted); margin: 0 0 16px; max-width: 70ch; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  margin-bottom: 12px; box-shadow: var(--shadow); }
+.card.critical { border-left: 4px solid var(--crit); }
+.card.warning { border-left: 4px solid var(--warn); }
+.card.info { border-left: 4px solid var(--info); }
+.card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 620; }
+.meta { color: var(--muted); font-size: 12.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.detail { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 650;
+  letter-spacing: .02em; background: var(--line); color: var(--ink); }
+.chip.ARCHIVE, .chip.failed, .chip.critical { background: var(--crit-soft); color: var(--crit); }
+.chip.PROPOSE, .chip.warning, .chip.running { background: var(--warn-soft); color: var(--warn); }
+.chip.RELATE, .chip.SUPERSEDE, .chip.info { background: var(--info-soft); color: var(--info); }
+.chip.ok, .chip.RETAG, .chip.NOTE { background: var(--ok-soft); color: var(--ok); }
+.chip.archived { background: var(--line); color: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+.btn { font: inherit; font-size: 13px; font-weight: 560; border-radius: 7px; padding: 6px 12px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.danger { color: var(--crit); border-color: var(--crit-soft); }
+.btn.armed { background: var(--crit); border-color: var(--crit); color: #fff; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+.mem { display: grid; grid-template-columns: 92px 1fr; gap: 4px 10px; margin-top: 10px; align-items: baseline; }
+.mem .k { color: var(--muted); font-size: 12px; }
+.link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: left; }
+.link:hover { text-decoration: underline; }
+.link.gone { color: var(--muted); text-decoration: line-through; }
+.rationale { margin-top: 10px; padding: 10px 12px; background: var(--bg); border-radius: 8px; white-space: pre-wrap;
+  overflow-wrap: anywhere; }
+.idref { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--soft); color: var(--accent);
+  border: 0; border-radius: 4px; padding: 0 4px; cursor: pointer; }
+ul.named { margin: 0; padding: 0; list-style: none; }
+ul.named li { margin: 2px 0; padding-left: 12px; position: relative; }
+ul.named li::before { content: "·"; position: absolute; left: 2px; color: var(--muted); }
+.empty { text-align: center; color: var(--muted); padding: 48px 0; }
+.empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 4px; }
+details.bucket { margin-top: 24px; }
+details.bucket summary { cursor: pointer; color: var(--muted); font-weight: 560; padding: 6px 0; }
+.mini { list-style: none; padding: 0; margin: 8px 0; }
+.mini li { padding: 6px 0; border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+th { color: var(--muted); font-weight: 560; font-size: 12px; }
+tr.run { cursor: pointer; }
+tr.run:hover td { background: var(--bg); }
+.tablewrap { overflow-x: auto; }
+.day { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin: 20px 0 8px; }
+.undone { opacity: .55; }
+/* drawer */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 20; display: none; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(640px, 100vw); background: var(--panel); z-index: 21;
+  border-left: 1px solid var(--line); overflow-y: auto; transform: translateX(100%); transition: transform .18s ease; }
+.drawer.open { transform: none; }
+.scrim.open { display: block; }
+.drawer .in { padding: 18px 22px 60px; }
+.drawer h2 { font-size: 16px; margin: 6px 0 8px; }
+.field { margin-top: 14px; }
+.field .k { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.field pre, .field .v { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.field pre { background: var(--bg); padding: 10px; border-radius: 8px; font-size: 12px; }
+.box { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; }
+.box h4 { margin: 0 0 8px; font-size: 13px; }
+select, input[type=text] { font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); color: var(--ink); }
+input[type=text] { width: 100%; }
+.picker .results { max-height: 180px; overflow-y: auto; margin-top: 4px; }
+.picker .results button { display: block; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line);
+  padding: 6px 4px; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+.picker .results button:hover { background: var(--bg); }
+.picker .chosen { margin-top: 6px; font-size: 13px; }
+.x { float: right; }
+.section-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 28px 0 10px; flex-wrap: wrap; }
+.section-head h2 { font-size: 15px; margin: 0; }
+.section-head .n { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 8px; border-radius: 10px; background: var(--line); font-size: 12px; text-align: center; }
+.section-head .meta { margin: 2px 0 0; }
+.headline { font-size: 15.5px; line-height: 1.4; margin: 6px 0 4px; }
+.why { margin: 0 0 10px; color: var(--muted); }
+.why b { color: var(--ink); font-weight: 600; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0 0 6px; }
+.entry { padding: 8px 0; border-top: 1px solid var(--line); }
+.entry:first-child { border-top: 0; }
+.snippet { color: var(--muted); font-size: 12.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.compare .side { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.compare .k { color: var(--muted); font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.mergerow { display: grid; grid-template-columns: 58px 50px 1fr; gap: 6px; align-items: start; border-top: 1px solid var(--line); }
+.mergerow.main { background: var(--ok-soft); border-radius: 6px; }
+.mergerow .entry { border: 0; }
+.pick { font-size: 11.5px; color: var(--muted); padding-top: 10px; display: flex; gap: 4px; align-items: center; cursor: pointer; }
+details.notes { margin-top: 10px; }
+details.notes summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 560; }
+.note { margin-top: 8px; }
+.chip.kind-duplicate { background: var(--crit-soft); color: var(--crit); }
+.chip.kind-merge { background: var(--warn-soft); color: var(--warn); }
+.chip.kind-repair { background: var(--warn-soft); color: var(--warn); }
+.chip.kind-link { background: var(--info-soft); color: var(--info); }
+.chip.kind-other { background: var(--line); color: var(--ink); }
+@media (max-width: 640px) { .compare { grid-template-columns: 1fr; } .mergerow { grid-template-columns: 52px 46px 1fr; } }
+.preview .diff { margin-top: 8px; }
+.preview .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.preview pre { margin: 2px 0 0; padding: 8px; border-radius: 6px; font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
+.preview .before { background: var(--crit-soft); }
+.preview .after { background: var(--ok-soft); }
+.k { color: var(--muted); font-size: 12px; font-weight: 600; }
+@media (max-width: 640px) { .preview .cols { grid-template-columns: 1fr; } }
+.toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+  padding: 9px 16px; border-radius: 8px; z-index: 30; font-size: 13px; max-width: 90vw; display: none; }
+.toast.err { background: var(--crit); color: #fff; }
+@media (max-width: 640px) {
+  .wrap { padding: 0 16px; }
+  .mem { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="top">
+      <h1>Memory curator</h1>
+      <div class="stats" id="stats"></div>
+      <div class="spacer"></div>
+      <button class="btn small" id="refresh">Refresh</button>
+    </div>
+    <nav id="tabs"></nav>
+  </div>
+</header>
+<main class="wrap" id="main"><p class="empty">Loading…</p></main>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer"><div class="in" id="drawerIn"></div></aside>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = "__DASHBOARD_TOKEN__";
+let data = null;
+let tab = null;
+
+// ---------- tiny helpers ----------
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) n.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return n;
+}
+/** replaceChildren that skips null/false instead of printing "null". */
+function rc(node, ...kids) { node.replaceChildren(...kids.flat().filter((k) => k != null && k !== false)); }
+const day = (s) => (s || "").slice(0, 10);
+const short = (id) => (id || "").slice(0, 8);
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined
+    ? { headers: { "x-dashboard-token": TOKEN } }
+    : { method: "POST", headers: { "x-dashboard-token": TOKEN, "content-type": "application/json" }, body: JSON.stringify(body) });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.message || json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+let toastTimer;
+function toast(msg, err) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.style.display = "block";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.style.display = "none"), err ? 6000 : 3000);
+}
+
+/** A button that runs one dashboard action. Dangerous ones need a second click. */
+function actionButton(spec, extra, after) {
+  const b = el("button", { class: `btn ${spec.kind || ""}`, title: spec.confirm || "" }, spec.label);
+  let armed = false, timer;
+  b.addEventListener("click", async () => {
+    if ((spec.kind === "danger" || spec.confirm) && !armed) {
+      armed = true; b.classList.add("armed"); b.textContent = "Click again to confirm";
+      timer = setTimeout(() => { armed = false; b.classList.remove("armed"); b.textContent = spec.label; }, 4000);
+      return;
+    }
+    clearTimeout(timer);
+    b.disabled = true;
+    try {
+      const more = typeof extra === "function" ? extra() : extra;
+      const r = await api("/api/act", { action: spec.action, params: { ...(spec.params || {}), ...(more || {}) } });
+      toast(r.message);
+      if (after) await after();
+      await load();
+    } catch (e) {
+      toast(e.message, true);
+      b.disabled = false;
+    }
+  });
+  return b;
+}
+
+function memLink(m, fallbackId) {
+  if (!m) return el("span", { class: "link gone" }, fallbackId ? `${short(fallbackId)} (deleted)` : "—");
+  return el("button", { class: "link" + (m.archived_at ? " gone" : ""), onclick: () => openMemory(m.id),
+    title: m.archived_at ? `archived ${m.archived_at}` : m.id }, m.title);
+}
+
+/** Rationale text with every memory id turned into something you can click. */
+function withIds(text) {
+  const out = el("div", { class: "rationale" });
+  const re = /\b[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\b/g;
+  let last = 0, m;
+  text = text || "";
+  while ((m = re.exec(text))) {
+    out.append(text.slice(last, m.index));
+    const id = m[0];
+    out.append(el("button", { class: "idref", onclick: () => openMemory(id) }, short(id)));
+    last = m.index + id.length;
+  }
+  out.append(text.slice(last));
+  return out;
+}
+
+// ---------- load + chrome ----------
+async function load() {
+  try {
+    data = await api("/api/overview");
+  } catch (e) {
+    rc(document.getElementById("main"), el("p", { class: "empty" }, el("b", {}, "Could not load"), e.message));
+    return;
+  }
+  if (!tab) tab = data.attention.length ? "attention" : "proposals";
+  renderChrome();
+  render();
+}
+
+function renderChrome() {
+  const s = data.stats, r = data.last_run;
+  rc(document.getElementById("stats"), 
+    el("span", {}, el("b", {}, s.active), " active"),
+    el("span", {}, el("b", {}, s.archived), " archived"),
+    r ? el("span", {}, "last run ", el("b", {}, `${day(r.started_at)} ${r.mode}`), " ", el("span", { class: `chip ${r.status}` }, r.status)) : el("span", {}, "no runs yet"),
+    data.halted ? el("span", { class: "chip failed" }, "HALTED") : "",
+  );
+  const p = data.proposals;
+  const tabs = [
+    ["attention", "Needs attention", data.attention.length, data.attention.some((a) => a.level === "critical")],
+    ["proposals", "Your decisions", p.total, false],
+    ["changes", "Recent changes", data.changes.filter((c) => !c.undone).length, false],
+    ["runs", "Runs", data.runs.length, false],
+  ];
+  rc(document.getElementById("tabs"), ...tabs.map(([key, label, n, hot]) =>
+    el("button", { class: tab === key ? "on" : "", onclick: () => { tab = key; renderChrome(); render(); } },
+      label, el("span", { class: "n" + (hot ? " hot" : "") }, n))));
+}
+
+function render() {
+  const main = document.getElementById("main");
+  const view = { attention: renderAttention, proposals: renderProposals, changes: renderChanges, runs: renderRuns }[tab];
+  rc(main, ...view());
+}
+
+// ---------- Needs attention ----------
+function renderAttention() {
+  if (!data.attention.length) {
+    return [el("div", { class: "empty" }, el("b", {}, "Nothing needs you right now."),
+      "The curator is running, the index is healthy and nothing it did looks risky.")];
+  }
+  return [
+    el("p", { class: "lead" }, "Problems with the curator itself, and changes it made that deserve a second look. Each one has the fix as a button."),
+    ...data.attention.map((a) => el("div", { class: `card ${a.level}` },
+      el("div", { class: "meta" }, el("span", { class: `chip ${a.level}` }, a.level)),
+      el("h3", {}, a.title),
+      a.detail ? el("p", { class: "detail" }, a.detail) : null,
+      a.memories && a.memories.length ? el("div", { class: "row" }, "Entries: ", ...a.memories.map((id) =>
+        el("button", { class: "idref", onclick: () => openMemory(id) }, short(id)))) : null,
+      a.buttons.length ? el("div", { class: "row" }, ...a.buttons.map((b) => actionButton(b))) : null,
+    )),
+  ];
+}
+
+// ---------- Your decisions ----------
+const KIND = {
+  duplicate: { label: "Remove a duplicate", plural: "Remove duplicates", blurb: "One entry repeats another. Archive the copy, or keep both." },
+  merge: { label: "Merge repeated entries", plural: "Merge repeated entries", blurb: "The same lesson was saved several times. Pick the one to keep; the rest will point to it." },
+  repair: { label: "Fix broken entries", plural: "Fix broken entries", blurb: "Entries saved with text in the wrong field or no tags, so searches miss them." },
+  link: { label: "Mark an entry replaced", plural: "Mark entries replaced", blurb: "A newer entry replaces an older one; both stay readable." },
+  other: { label: "Other suggestion", plural: "Other suggestions", blurb: "One-off tasks the curator cannot do itself." },
+};
+
+function entryLine(e, extra) {
+  return el("div", { class: "entry" },
+    el("div", {}, memLink(e), " ", el("span", { class: "meta", style: "display:inline-flex" },
+      `${day(e.created_at)} · ${e.area}${e.project ? " · " + e.project : ""}`),
+      e.archived_at ? el("span", { class: "chip archived", style: "margin-left:6px" }, "archived") : null, extra || null),
+    e.problems ? el("div", { class: "row", style: "margin-top:4px" }, ...e.problems.map((p) => el("span", { class: "chip warning" }, p))) : null,
+    e.snippet ? el("div", { class: "snippet" }, e.snippet) : null);
+}
+
+function notesBlock(c) {
+  if (!c.notes.length) return null;
+  return el("details", { class: "notes" },
+    el("summary", {}, c.notes.length === 1 ? "The curator's reasoning" : `The curator's reasoning (${c.notes.length} notes)`),
+    ...c.notes.map((n) => el("div", { class: "note" },
+      el("div", { class: "meta" }, n.date, n.about ? ` · on “${n.about}”` : ""), withIds(n.text))));
+}
+
+function decisionCard(c) {
+  const base = { ids: c.action_ids };
+  let body = null, extra = () => base;
+
+  if (c.kind === "duplicate") {
+    body = el("div", { class: "compare" }, ...c.entries.map((e, i) => el("div", { class: "side" },
+      el("div", { class: "k" }, i === 0 ? "Would be archived" : "Would stay"), entryLine(e))));
+  } else if (c.kind === "merge") {
+    let main = c.suggested_main;
+    const ticks = new Map();
+    const rows = el("div", { class: "mergelist" });
+    const draw = () => rows.replaceChildren(...c.entries.map((e) => {
+      const isMain = e.id === main;
+      if (!ticks.has(e.id)) ticks.set(e.id, !!e.fold);
+      const radio = el("input", { type: "radio", name: c.key, checked: isMain, disabled: !!e.archived_at, title: "Keep this one",
+        onchange: () => { main = e.id; draw(); } });
+      const box = el("input", { type: "checkbox", checked: !isMain && ticks.get(e.id), disabled: isMain || !!e.archived_at, title: "Fold into the main one",
+        onchange: (ev) => ticks.set(e.id, ev.target.checked) });
+      return el("div", { class: "mergerow" + (isMain ? " main" : "") },
+        el("label", { class: "pick" }, radio, "main"), el("label", { class: "pick" }, box, "fold"),
+        entryLine(e, isMain ? el("span", { class: "chip ok", style: "margin-left:6px" }, "keep")
+          : el("span", { class: "chip" + ((e.overlap ?? 0) < 0.1 ? " warning" : ""), style: "margin-left:6px",
+              title: "Share of title words in common with the main entry" }, `${Math.round((e.overlap ?? 0) * 100)}% title match`)));
+    }));
+    draw();
+    body = el("div", {}, el("p", { class: "hint" }, "Pick the entry to keep (main). Ticked entries will point to it. Entries with little in common with the main one start unticked — a note may have named them by mistake."), rows);
+    extra = () => ({ ...base, main, others: c.entries.filter((e) => e.id !== main && ticks.get(e.id)).map((e) => e.id) });
+  } else if (c.kind === "repair") {
+    const row = (e) => {
+      const preview = el("div", { class: "preview" });
+      const tools = e.manual
+        ? [el("span", { class: "chip", title: e.manual }, "needs a hand: " + e.manual)]
+        : [el("button", { class: "btn small", onclick: () => showRepair(e.id, preview) }, "Preview fix"),
+           actionButton({ action: "repair.apply", label: "Repair", kind: "plain" }, { memory_id: e.id })];
+      return el("div", { class: "entry" },
+        el("div", {}, memLink(e), " ", el("span", { class: "meta", style: "display:inline-flex" }, day(e.created_at))),
+        el("div", { class: "row", style: "margin-top:4px" }, ...e.problems.map((p) => el("span", { class: "chip warning" }, p)), ...tools),
+        preview);
+    };
+    const auto = c.entries.filter((e) => !e.manual), manual = c.entries.filter((e) => e.manual);
+    body = el("div", {},
+      auto.length ? el("div", { class: "k", style: "margin-top:6px" }, `Can be repaired here (${auto.length})`) : null,
+      ...auto.slice(0, 5).map(row),
+      auto.length > 5 ? el("details", {}, el("summary", { class: "meta" }, `Show the other ${auto.length - 5}`), ...auto.slice(5).map(row)) : null,
+      manual.length ? el("div", { class: "k", style: "margin-top:14px" }, `Need a hand (${manual.length})`) : null,
+      ...manual.map(row));
+    if (manual.length) {
+      const ask = "Repair these agent-memory entries. Each was saved broken by the tool-call serialisation bug " +
+        "(fields spilled into each other, or tags lost). For each: get_memory, move any spilled text back into its own " +
+        "field with update_memory, and restore tags from the entry's own text. Never drop text from symptom.\n\n" +
+        manual.map((e) => `- ${e.id} — ${e.title} (${(e.problems || []).join("; ")}; ${e.manual})`).join("\n");
+      c = { ...c, extraButtons: [el("button", { class: "btn", onclick: async () => {
+        try { await navigator.clipboard.writeText(ask); toast("Copied — paste it into Claude Code"); } catch { toast("Could not copy", true); }
+      } }, `Copy a request for the ${manual.length} that need a hand`)] };
+    }
+  } else {
+    body = el("div", {}, ...c.entries.slice(0, 6).map((e) => entryLine(e)),
+      c.entries.length > 6 ? el("details", {}, el("summary", { class: "meta" }, `${c.entries.length - 6} more`), ...c.entries.slice(6).map((e) => entryLine(e))) : null);
+  }
+
+  return el("div", { class: `card decision ${c.kind}` },
+    el("div", { class: "meta" },
+      el("span", { class: `chip kind-${c.kind}` }, KIND[c.kind].label),
+      c.times > 1 ? el("span", { class: "chip warning", title: "Raised again on later nights" }, `raised by ${c.times} runs`) : null,
+      c.last_seen ? el("span", {}, c.times > 1 ? `${day(c.first_seen)} → ${day(c.last_seen)}` : day(c.last_seen)) : null,
+      c.similarity != null && c.kind !== "merge" ? el("span", {}, `overlap ${Math.round(c.similarity * 100)}%`) : null),
+    el("h3", { class: "headline" }, c.headline),
+    el("p", { class: "why" }, el("b", {}, "Why you: "), c.why),
+    body,
+    notesBlock(c),
+    el("div", { class: "row" }, ...(c.extraButtons || []), ...c.buttons.map((b) => actionButton(b, extra))),
+  );
+}
+
+function bucket(title, explain, groups) {
+  if (!groups.length) return null;
+  const ids = groups.flatMap((g) => g.action_ids);
+  return el("details", { class: "bucket" },
+    el("summary", {}, `${title} (${groups.length})`),
+    el("p", { class: "lead" }, explain),
+    actionButton({ action: "proposal.dismiss", label: `Clear all ${groups.length}`, params: { note: title } }, { ids }),
+    el("ul", { class: "mini" }, ...groups.map((g) => el("li", {},
+      el("span", { class: `chip ${g.verdict}` }, g.verdict), memLink(g.memory, g.key.split("|")[0]),
+      el("span", { class: "meta" }, day(g.last_seen)),
+      g.text ? el("div", { class: "meta", style: "flex-basis:100%" }, g.text.length > 220 ? g.text.slice(0, 220) + "…" : g.text) : null))),
+  );
+}
+
+function renderProposals() {
+  const p = data.proposals;
+  const order = ["duplicate", "merge", "repair", "link", "other"];
+  const out = [];
+  const counts = order.filter((k) => p.sections[k].length)
+    .map((k) => `${p.sections[k].length} × ${KIND[k].label.toLowerCase()}`);
+  if (!p.total) {
+    out.push(el("div", { class: "empty" }, el("b", {}, "Nothing to decide."), "Everything the curator asked you has been answered."));
+  } else {
+    out.push(el("p", { class: "lead" }, "What the curator needs you to decide, grouped by the job. " + counts.join(" · ") + "."));
+  }
+  for (const k of order) {
+    const cards = p.sections[k];
+    if (!cards.length) continue;
+    const head = el("div", { class: "section-head" },
+      el("div", {}, el("h2", {}, KIND[k].plural, el("span", { class: "n" }, cards.length)), el("p", { class: "meta" }, KIND[k].blurb)));
+    out.push(head, ...cards.map(decisionCard));
+  }
+  if (p.queuedLinks.length) {
+    out.push(el("details", { class: "bucket" },
+      el("summary", {}, `Links queued — applied automatically on the next curator run (${p.queuedLinks.length})`),
+      el("p", { class: "lead" }, "A link only cross-references two entries, so it needs no confirmation. Each one will appear under Recent changes, with an undo."),
+      el("ul", { class: "mini" }, ...p.queuedLinks.map((g) => el("li", {},
+        memLink(g.memory, g.key.split("|")[0]), el("span", { class: "meta" }, "↔"),
+        el("button", { class: "idref", onclick: () => openMemory(g.key.split("|")[2]) }, short(g.key.split("|")[2])))))));
+  }
+  out.push(bucket("Nothing to do — explanations only",
+    "The curator filed these as proposals, but they only explain why it kept an entry. There is nothing to act on.", p.explain));
+  out.push(bucket("Already settled", "The entry is archived or gone, or the link already exists.", p.obsolete));
+  out.push(bucket("Trial-run leftovers", "Recorded by the dry runs before the curator went live. KEEP asks for nothing; the tags or note text of RETAG and NOTE were never saved, so they cannot be applied.", p.dryrun));
+  return out.filter(Boolean);
+}
+
+function memRow(label, m, fallbackId, extra) {
+  return [el("div", { class: "k" }, label), el("div", {}, memLink(m, fallbackId),
+    m ? el("span", { class: "meta", style: "display:inline-flex;margin-left:8px" },
+      `${m.area}${m.project ? " · " + m.project : ""} · ${m.type}/${m.severity}`,
+      m.archived_at ? el("span", { class: "chip archived" }, "archived") : null) : null,
+    extra || null)];
+}
+
+/** Before/after of a mechanical repair, shown inline under the entry. */
+async function showRepair(id, box) {
+  if (box.childNodes.length) { rc(box); return; }
+  rc(box, "Loading…");
+  try {
+    const plan = await api(`/api/repair/${id}`);
+    rc(box, ...Object.entries(plan.changes).map(([k, v]) => {
+      const label = k.replace("_", " ");
+      // Most repairs only cut a spilled tail off the end; show just that, not two copies
+      // of the same paragraph with the difference somewhere below the fold.
+      if (v.before && v.after && v.before.startsWith(v.after)) {
+        return el("div", { class: "diff" },
+          el("div", { class: "k" }, `${label}: unchanged except this is cut from the end`),
+          el("pre", { class: "before" }, v.before.slice(v.after.length).trim()));
+      }
+      return el("div", { class: "diff" }, el("div", { class: "k" }, v.before ? `${label}: before → after` : `${label}: recovered`),
+        v.before ? el("div", { class: "cols" }, el("pre", { class: "before" }, v.before), el("pre", { class: "after" }, v.after ?? "(empty)"))
+          : el("pre", { class: "after" }, v.after ?? "(empty)"));
+    }));
+  } catch (e) { rc(box, e.message); }
+}
+
+// ---------- Recent changes ----------
+function renderChanges() {
+  if (!data.changes.length) return [el("div", { class: "empty" }, el("b", {}, "No changes in the last 14 days."), "")];
+  const out = [el("p", { class: "lead" }, "What the curator changed on its own in the last 14 days. Undo reverts just that one change and any link it drew.")];
+  let lastDay = null;
+  for (const c of data.changes) {
+    if (day(c.created_at) !== lastDay) { lastDay = day(c.created_at); out.push(el("div", { class: "day" }, lastDay)); }
+    out.push(el("div", { class: "card" + (c.undone ? " undone" : "") },
+      el("div", { class: "meta" }, el("span", { class: `chip ${c.verdict}` }, c.verdict), c.undone ? el("span", { class: "chip" }, "undone") : null),
+      el("div", { class: "mem" }, ...memRow("Entry", c.memory, null), ...(c.cites ? memRow("Cites", c.cites, null) : [])),
+      c.rationale ? withIds(c.rationale) : null,
+      c.buttons.length ? el("div", { class: "row" }, ...c.buttons.map((b) => actionButton(b))) : null,
+    ));
+  }
+  return out;
+}
+
+// ---------- Runs ----------
+function renderRuns() {
+  if (!data.runs.length) return [el("div", { class: "empty" }, el("b", {}, "No runs yet."), "")];
+  const body = el("tbody");
+  for (const r of data.runs) {
+    const detail = el("tr", { style: "display:none" }, el("td", { colspan: 7 }));
+    const tr = el("tr", { class: "run", onclick: () => toggleRun(r, detail) },
+      el("td", {}, r.started_at.slice(0, 16)),
+      el("td", {}, r.mode),
+      el("td", {}, el("span", { class: `chip ${r.status}` }, r.status)),
+      el("td", {}, r.window_from ? `${r.window_from} → ${r.window_to}` : "—"),
+      el("td", {}, `${r.candidates} / ${r.applied} / ${r.proposed}`),
+      el("td", { style: "max-width:280px;overflow-wrap:anywhere;color:var(--muted)" }, r.notes || ""),
+      el("td", { onclick: (e) => e.stopPropagation() }, ...r.buttons.map((b) => actionButton(b))),
+    );
+    body.append(tr, detail);
+  }
+  return [
+    el("p", { class: "lead" }, "Every pass, newest first. Click a row to see each decision it made. Candidates / applied / proposed."),
+    el("div", { class: "tablewrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ...["Started", "Mode", "Status", "Window", "Cand / App / Prop", "Notes", ""].map((h) => el("th", {}, h)))),
+      body)),
+  ];
+}
+
+async function toggleRun(r, detail) {
+  if (detail.style.display !== "none") { detail.style.display = "none"; return; }
+  detail.style.display = "";
+  const td = detail.firstChild;
+  rc(td, "Loading…");
+  try {
+    const { actions } = await api(`/api/run/${r.id}`);
+    rc(td, el("ul", { class: "mini" }, ...actions.map((a) => el("li", {},
+      el("span", { class: `chip ${a.verdict}` }, a.verdict),
+      el("span", { class: "chip" + (a.tier === "refused" ? " failed" : "") }, a.tier),
+      el("button", { class: "link", onclick: () => openMemory(a.memory_id) }, a.title),
+      a.resolution ? el("span", { class: "chip ok" }, a.resolution) : null,
+      a.rationale ? el("div", { class: "meta", style: "flex-basis:100%" }, a.rationale) : null,
+    ))));
+    if (!actions.length) rc(td, "No decisions recorded.");
+  } catch (e) { rc(td, e.message); }
+}
+
+// ---------- memory drawer ----------
+function closeDrawer() {
+  document.getElementById("drawer").classList.remove("open");
+  document.getElementById("scrim").classList.remove("open");
+}
+document.getElementById("scrim").onclick = closeDrawer;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+/** Search-as-you-type for the memory an action should point at. */
+function picker(placeholder, exclude) {
+  const state = { id: null };
+  const input = el("input", { type: "text", placeholder });
+  const results = el("div", { class: "results" });
+  const chosen = el("div", { class: "chosen" });
+  let t;
+  input.addEventListener("input", () => {
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      const q = input.value.trim();
+      if (!q) { rc(results, ); return; }
+      const { results: rs } = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      rc(results, ...rs.filter((r) => r.id !== exclude).map((r) => el("button", {
+        onclick: () => { state.id = r.id; rc(chosen, "→ ", el("b", {}, r.title), " ", el("span", { class: "mono" }, short(r.id))); rc(results, ); input.value = ""; },
+      }, r.title, " ", el("span", { class: "meta", style: "display:inline" }, `${short(r.id)} · ${r.area}${r.archived_at ? " · archived" : ""}`))));
+    }, 200);
+  });
+  return { node: el("div", { class: "picker" }, input, results, chosen), get id() { return state.id; } };
+}
+
+async function openMemory(id) {
+  const box = document.getElementById("drawerIn");
+  document.getElementById("drawer").classList.add("open");
+  document.getElementById("scrim").classList.add("open");
+  rc(box, "Loading…");
+  let d;
+  try { d = await api(`/api/memory/${id}`); } catch (e) { rc(box, el("p", {}, e.message)); return; }
+  const m = d.memory;
+  const reopen = () => openMemory(m.id);
+  const field = (k, v, pre) => v ? el("div", { class: "field" }, el("div", { class: "k" }, k), pre ? el("pre", {}, v) : el("div", { class: "v" }, v)) : null;
+
+  const actions = [];
+  if (m.archived_at) {
+    actions.push(el("div", { class: "box" }, el("h4", {}, `Archived ${m.archived_at} (${(m.archive_reason || "").replace(/_/g, " ")})`),
+      actionButton({ action: "memory.restore", label: "Restore", kind: "primary" }, { memory_id: m.id }, reopen)));
+  } else {
+    const reason = el("select", {}, ...["duplicate_of", "superseded_by", "stale", "no_longer_relevant"].map((r) => el("option", { value: r }, r.replace(/_/g, " "))));
+    const repl = picker("Search for the entry that replaces it (needed for duplicate / superseded)…", m.id);
+    const archiveBtn = el("button", { class: "btn danger" }, "Archive");
+    archiveBtn.onclick = () => runDirect("memory.archive", { memory_id: m.id, reason: reason.value, cites: repl.id }, reopen);
+    actions.push(el("div", { class: "box" }, el("h4", {}, "Archive this entry"), el("div", { class: "row", style: "margin-top:0" }, reason, archiveBtn), repl.node));
+
+    const sup = picker("Search for the newer entry…", m.id);
+    const supBtn = el("button", { class: "btn" }, "Mark superseded");
+    supBtn.onclick = () => runDirect("memory.supersede", { memory_id: m.id, cites: sup.id }, reopen);
+    actions.push(el("div", { class: "box" }, el("h4", {}, "Superseded by (keeps it searchable, points to the newer one)"), sup.node, el("div", { class: "row" }, supBtn)));
+  }
+  const kind = el("select", {}, ...["refines", "supersedes", "corrects", "contradicts", "duplicate_of"].map((k) => el("option", { value: k }, k.replace(/_/g, " "))));
+  const rel = picker("Search for the related entry…", m.id);
+  const relBtn = el("button", { class: "btn" }, "Link");
+  relBtn.onclick = () => runDirect("memory.relate", { memory_id: m.id, cites: rel.id, kind: kind.value }, reopen);
+  actions.push(el("div", { class: "box" }, el("h4", {}, "Link to another entry"), el("div", { class: "row", style: "margin-top:0" }, el("span", {}, "this"), kind, el("span", {}, "→")), rel.node, el("div", { class: "row" }, relBtn)));
+
+  rc(box, 
+    el("button", { class: "btn small x", onclick: closeDrawer }, "Close"),
+    el("div", { class: "meta" }, el("span", { class: "mono" }, m.id), m.archived_at ? el("span", { class: "chip archived" }, "archived") : null),
+    el("h2", {}, m.title),
+    el("div", { class: "meta" }, `${m.type}/${m.severity} · ${m.area}${m.project ? " · " + m.project : ""} · created ${day(m.created_at)} · updated ${day(m.updated_at)}`),
+    m.superseded_by ? el("div", { class: "field" }, el("div", { class: "k" }, "Superseded by"), el("button", { class: "idref", onclick: () => openMemory(m.superseded_by) }, short(m.superseded_by))) : null,
+    field("Symptom", m.symptom), field("Root cause", m.root_cause), field("Fix", m.fix, true),
+    field("Code", m.code_example, true), field("Trigger", m.trigger_context), field("Tags", m.tags), field("Curator notes", m.curator_note, true),
+    d.relations.length ? el("div", { class: "field" }, el("div", { class: "k" }, "Links"),
+      el("ul", { class: "mini" }, ...d.relations.map((r) => el("li", {},
+        el("span", {}, r.direction === "out" ? `this ${r.kind}` : `${r.kind} this:`), memLink(r.other, r.direction === "out" ? r.to_id : r.from_id),
+        el("span", { class: "meta" }, `by ${r.created_by}`),
+        actionButton({ action: "relation.delete", label: "Remove", kind: "plain" }, { relation_id: r.id }, reopen))))) : null,
+    ...actions,
+  );
+}
+
+async function runDirect(action, params, after) {
+  try {
+    const r = await api("/api/act", { action, params });
+    toast(r.message);
+    await after();
+    await load();
+  } catch (e) { toast(e.message, true); }
+}
+
+document.getElementById("refresh").onclick = load;
+load();
+</script>
+</body>
+</html>

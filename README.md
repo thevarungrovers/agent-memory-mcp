@@ -439,6 +439,66 @@ pass still exits 0 and still reports `ok`, so the only thing distinguishing it f
 working installation is the scorecard reading `0 changed, N to review`. If the corpus
 never changes, check there first.
 
+### The dashboard
+
+```sh
+npm run dashboard            # or: node dist/cli.js dashboard [--port 4777] [--no-open]
+```
+
+One local page over the curator's ledger, so you never have to read the reports to act
+on them. Each night writes its own report, and a question the curator could not settle
+used to be re-asked in a new file every night with nowhere to answer it. The dashboard
+shows each question once, however many nights it was asked, and every item carries the
+buttons that answer it:
+
+- **Needs attention** — a set failure latch (*Resume the curator*), a run stuck in
+  `running` (*Mark it failed*), a guard claim never released, an inconsistent search
+  index (*Rebuild*), trailing-window erosion, moved canaries (*New baseline*), an archive
+  of an entry under 30 days old (*Restore* / *The archive is right*), guard refusals.
+- **Your decisions** — the curator's proposals, grouped by the job they ask of you rather
+  listed one note at a time. Every card leads with what it wants and *why you* — why the
+  curator could not do it itself — with its full reasoning folded underneath:
+  - *Remove a duplicate* — the two entries side by side; archive, keep both, or link.
+  - *Merge repeated entries* — every note about one re-stored lesson becomes one card
+    listing the copies. Pick the entry to keep; ticked copies are marked replaced by it
+    (or archived). Copies whose titles share little with the main one start unticked,
+    because a note's list of "the same gotcha" ids is not always right.
+  - *Fix broken entries* — rows where a tool call's XML leaked into a field
+    (`…</fix>\n<root_cause>…`) and the later fields were never stored, read from the rows
+    themselves. Most can be repaired in place: *Preview fix* shows exactly what moves,
+    and *Repair* moves the spilled text back into its own field without rewording it.
+    A conflict with text already in that field is left for you. Repairs are recorded in
+    `memory_revisions` like any other edit.
+  - *Mark entries replaced* — a newer entry supersedes an older one; both stay readable.
+  - *Other suggestions* — anything else, headed by the curator's one-line `ask`.
+
+  Links are never put to you: a link only cross-references two entries, so the curator
+  applies it on its own — including any left waiting by a dry run, which the next live
+  run settles before it does anything else. They appear under *Recent changes* with an
+  undo, and until then as a collapsed "queued" line.
+
+  Notes that ask for nothing (the curator explaining a KEEP), settled questions and the
+  dry-run leftovers are collapsed underneath with a *Clear all*.
+- **Recent changes** — what the curator did on its own in the last 14 days, each with an
+  *Undo* that reverts that one change and any link it drew.
+- **Runs** — every pass with its decisions, and *Undo whole run*.
+
+Clicking an entry anywhere opens it in full, with archive / restore / supersede / link
+controls and a search to pick the other entry by title or id.
+
+Answers are stored on the ledger row (`curation_actions.resolved_at`, `resolution`). A
+`PROPOSE` must carry an `ask` — one imperative sentence — and a note that only explains a
+kept entry must be a `KEEP`; both are in `curator/PROMPT.md`.
+A proposal you dismissed is answered automatically if the curator asks the identical
+question again about a row nobody has edited since, and the nightly report counts it
+instead of re-listing it. Every write goes through `db.ts` as a session writer, never as
+the curator, so `undo --run` never reverts a decision you made by hand.
+
+It binds to 127.0.0.1 only, and every API call needs a token minted at start-up and
+embedded in the page it serves, so another website open in the same browser cannot drive
+it. Like the scheduled job, it refuses to start when `~/.agent-memory` is a symlink to an
+unmounted drive instead of replacing it with an empty store.
+
 ### What it changed
 
 The report's first section after the red flags is **What changed**, and it is the
@@ -567,6 +627,7 @@ agent-memory curate --mode nightly [--dry-run]
 agent-memory canary [--save-baseline]
 agent-memory undo --run <id>
 agent-memory state [--get k] [--set k=v]
+agent-memory dashboard [--port 4777] [--no-open]     # review page with action buttons
 ```
 
 ## Database

@@ -14,13 +14,16 @@
  * curation command exits non-zero and says why: a maintenance job that fails quietly
  * is worse than one that does not run.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   getActiveRules, getState, listMemories, memoryStats, revertRun, setState, snapshotTo,
 } from "./db.js";
 import { backfill, curate } from "./curation/run.js";
 import { diffCanaries, loadBaseline, loadCanaries, runCanaries, saveBaseline } from "./curation/canary.js";
+import { startDashboard } from "./dashboard/server.js";
 import type { RuleEntry } from "./types.js";
 
 type Format = "hook" | "markdown" | "json";
@@ -123,6 +126,9 @@ const USAGE = `agent-memory <command> [flags]
   canary     [--file <path>] [--save-baseline]  pinned queries that prove retrieval still works
   undo       --run <run_id>                     revert one curation run, column by column
   state      [--get <key>] [--set <key>=<value>]
+  dashboard  [--port <n>] [--no-open]           local review page: what needs attention,
+                                                open proposals, recent changes, runs —
+                                                with a button for every answer
 
 Dates are LOCAL dates. The stored timestamps are UTC, so an evening run that compared
 against a UTC day would match nothing written that evening.`;
@@ -199,6 +205,44 @@ function runCanaryCommand(flags: Record<string, string>): number {
     process.stdout.write(`  CHANGED ${c.name}\n    was [${c.was.join(", ")}]\n    now [${c.now.join(", ")}]\n`);
   }
   return diff.changed.length === 0 ? 0 : 2;
+}
+
+/**
+ * The dashboard is a long-lived process started by hand, often when something already
+ * looks wrong — exactly when ~/.agent-memory may be a symlink into a cloud drive that
+ * is not mounted. resolveDataDir() would replace that symlink with an empty directory
+ * the moment the store is opened, so check before anything opens it.
+ */
+function storeIsReachable(): string | null {
+  const dir = process.env.AGENT_MEMORY_DIR ? resolve(process.env.AGENT_MEMORY_DIR) : join(homedir(), ".agent-memory");
+  try {
+    if (lstatSync(dir).isSymbolicLink() && !existsSync(dir)) {
+      return `${dir} is a symlink whose target is not mounted — refusing to open the store`;
+    }
+  } catch {
+    return `no store at ${dir}`;
+  }
+  if (!existsSync(join(dir, "memory.db"))) return `no database at ${join(dir, "memory.db")}`;
+  return null;
+}
+
+async function runDashboard(flags: Record<string, string>): Promise<void> {
+  const problem = storeIsReachable();
+  if (problem) {
+    process.stderr.write(`agent-memory dashboard: ${problem}\n`);
+    process.exit(78);
+  }
+  const port = flags.port ? Number(flags.port) : 4777;
+  const canaries = join(curatorHome(flags), "canaries.json");
+  const { url } = await startDashboard({
+    port,
+    canariesFile: existsSync(canaries) ? canaries : null,
+    log: (line) => process.stdout.write(`[dashboard] ${line}\n`),
+  });
+  process.stdout.write(`agent-memory dashboard on ${url}  (Ctrl-C to stop)\n`);
+  if (!("no-open" in flags) && process.platform === "darwin") {
+    spawn("open", [url], { stdio: "ignore", detached: true }).unref();
+  }
 }
 
 function main(): void {
@@ -321,6 +365,13 @@ function main(): void {
       process.exit(1);
       break;
     }
+
+    case "dashboard":
+      runDashboard(flags).catch((error) => {
+        process.stderr.write(`agent-memory dashboard: ${error}\n`);
+        process.exit(1);
+      });
+      return;
 
     case "rules":
       break;

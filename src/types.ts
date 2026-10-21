@@ -81,7 +81,19 @@ export interface CurationAction {
   cites: string | null;
   rationale: string | null;
   created_at: string;
+  /** Set when a human answers a proposal, from the dashboard. NULL means still open. */
+  resolved_at: string | null;
+  resolution: ProposalResolution | null;
+  resolution_note: string | null;
+  /** PROPOSE only: one imperative sentence saying what the human should do. */
+  ask: string | null;
 }
+
+/**
+ * On a proposal — applied: the human did what was proposed; dismissed: they decided
+ * against it. On an applied action — undone: the human reverted it from the dashboard.
+ */
+export type ProposalResolution = "applied" | "dismissed" | "undone";
 
 export type MemoryType = "bug" | "pattern" | "gotcha" | "solution" | "learning";
 

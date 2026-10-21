@@ -58,7 +58,7 @@ One decision per candidate. `memory_id` is the candidate's id.
 | `RELATE` | records a link between two entries | they are related and a reader of one should know about the other |
 | `SUPERSEDE` | marks the candidate as superseded by `cites` | another entry has replaced this one. **Both stay readable** |
 | `ARCHIVE` | hides it from search, reversibly | it is a true duplicate of `cites`, or `cites` wholly replaces it |
-| `PROPOSE` | records a suggestion, changes nothing | anything you think should happen that the verdicts above do not cover |
+| `PROPOSE` | asks a human to do something, changes nothing | something should happen that the verdicts above do not cover. Requires `ask` |
 
 ### Rules that are enforced, not suggested
 
@@ -79,7 +79,17 @@ so there is nothing to gain by working around them:
   wrong belief was plausible.
 
 If you want something to happen that the rules forbid, use `PROPOSE` and say why. A
-human reads these.
+human reads these, one card each, and has to decide what to do from the card alone:
+
+- **`ask` is required**: one imperative sentence, under 25 words, naming what the human
+  should do and to which entries — "Merge 14bb1013, 7163a50b and 3b43fc9f into f364599f
+  and archive the rest." Put the reasoning in `rationale`, not here.
+- **No ask, no PROPOSE.** If the entry is fine and you only want to explain why you are
+  keeping it, that is `KEEP` with a rationale. A proposal that asks for nothing still
+  lands in a human's queue and costs them a read.
+- **One problem, one proposal per pass.** When the same issue (a cluster of duplicates, a
+  batch of entries damaged the same way) shows up under several candidates, raise it once
+  and `KEEP` the others.
 
 ## Judging a cluster
 
@@ -111,6 +121,12 @@ Write exactly this shape to `{{DECISIONS_PATH}}`:
       "memory_id": "<candidate id>",
       "verdict": "SUPERSEDE",
       "cites": "<id of the entry that replaces it>",
+      "rationale": "..."
+    },
+    {
+      "memory_id": "<candidate id>",
+      "verdict": "PROPOSE",
+      "ask": "one imperative sentence: what the human should do",
       "rationale": "..."
     },
     {
