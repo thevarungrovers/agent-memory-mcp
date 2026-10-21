@@ -469,8 +469,13 @@ buttons that answer it:
     and *Repair* moves the spilled text back into its own field without rewording it.
     A conflict with text already in that field is left for you. Repairs are recorded in
     `memory_revisions` like any other edit.
-  - *Link related entries* — one click each, or *Link all*.
+  - *Mark entries replaced* — a newer entry supersedes an older one; both stay readable.
   - *Other suggestions* — anything else, headed by the curator's one-line `ask`.
+
+  Links are never put to you: a link only cross-references two entries, so the curator
+  applies it on its own — including any left waiting by a dry run, which the next live
+  run settles before it does anything else. They appear under *Recent changes* with an
+  undo, and until then as a collapsed "queued" line.
 
   Notes that ask for nothing (the curator explaining a KEEP), settled questions and the
   dry-run leftovers are collapsed underneath with a *Clear all*.

@@ -5,7 +5,7 @@ import {
   curationCoverage, finishCurationRun, ftsIntegrityCheck, getState, markCurated,
   memoryStats, setState, snapshotTo, startCurationRun,
 } from "../db.js";
-import { applyDecisions, archivesRemaining, checkTrailingInvariants, recordStatsPoint } from "./apply.js";
+import { applyDecisions, archivesRemaining, checkTrailingInvariants, recordStatsPoint, settleLinkProposals } from "./apply.js";
 import { buildPacket } from "./candidates.js";
 import { diffCanaries, loadBaseline, loadCanaries, runCanaries, saveBaseline } from "./canary.js";
 import { renderReport } from "./report.js";
@@ -196,6 +196,15 @@ export function curate(opts: CurateOptions): CurateResult {
   snapshotTo(snapshotPath);
   log(`snapshot -> ${snapshotPath}`);
 
+  // Links waiting in the queue are applied, not asked about. After the snapshot, so
+  // they are covered by it like everything else this run does.
+  let linksApplied = 0;
+  if (!opts.dryRun) {
+    const settled = settleLinkProposals(runId);
+    linksApplied = settled.linked;
+    if (settled.linked || settled.skipped) log(`queued links: ${settled.linked} applied, ${settled.skipped} dropped`);
+  }
+
   const canaries = opts.canariesFile && existsSync(opts.canariesFile) ? loadCanaries(opts.canariesFile) : [];
   let baseline = canaries.length ? loadBaseline() : null;
   if (canaries.length && !baseline) {
@@ -219,7 +228,7 @@ export function curate(opts: CurateOptions): CurateResult {
 
   if (packet.clusters.length === 0) {
     log("nothing to review");
-    finishCurationRun(runId, "ok", { candidates: 0, applied: 0, proposed: 0, notes: "no candidates" });
+    finishCurationRun(runId, "ok", { candidates: 0, applied: linksApplied, proposed: 0, notes: linksApplied ? `no candidates; ${linksApplied} queued links applied` : "no candidates" });
     setState("last_success_date", to);
     recordStatsPoint();
     return { runId, status: "ok", headline: `nothing to review (window ${from} → ${to})`, reportPath: null, notable: false };
@@ -267,7 +276,7 @@ export function curate(opts: CurateOptions): CurateResult {
   // says "running" is a report written about a run that had not finished.
   finishCurationRun(runId, status, {
     candidates: packet.clusters.length,
-    applied: outcome.applied,
+    applied: outcome.applied + linksApplied,
     proposed: outcome.proposed,
     notes: failed ? (trailing.violations.join("; ") || ftsAfter.error || "invariant violation") : undefined,
   });

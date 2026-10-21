@@ -76,9 +76,17 @@ ok("both nights' proposals are answered", dupCard.action_ids.every((id) => db.ge
 ok("the second click fails cleanly", !act("proposal.archive", { ids: dupCard.action_ids, memory_id: dup, reason: "duplicate_of", cites: survivor }, ctx).ok);
 ok("archiving needs a replacement for duplicate_of", !act("memory.archive", { memory_id: kept, reason: "duplicate_of" }, ctx).ok);
 
-const linkCard = buildDecisions().sections.link[0];
-ok("link the two", act("proposal.relate", { ids: linkCard.action_ids, memory_id: relA, cites: relB, kind: "refines" }, ctx).ok);
-ok("...the link exists", db.getRelations(relA).some((x) => x.to_id === relB && x.kind === "refines"));
+ok("a link is queued, not put to you as a decision", buildDecisions().sections.link.length === 0 && buildDecisions().queuedLinks.length === 1);
+{
+  const { settleLinkProposals } = await import("../src/curation/apply.js");
+  const linkRun = db.startCurationRun("nightly", null, null);
+  const settled = settleLinkProposals(linkRun);
+  db.finishCurationRun(linkRun, "ok", {});
+  ok("the next run applies it without asking", settled.linked === 1 && db.getRelations(relA).some((x) => x.to_id === relB && x.created_by === "curator"));
+  ok("...records it as this run's change, so it can be undone", db.getCurationActions(linkRun).some((a) => a.verdict === "RELATE" && a.tier === "applied"));
+  ok("...and the queue is empty", buildDecisions().queuedLinks.length === 0);
+  ok("settling again does nothing", settleLinkProposals(linkRun).linked === 0);
+}
 
 const m2 = buildDecisions().sections.merge[0];
 r = act("merge.apply", { ids: m2.action_ids, main: survivor, others: [consolidate], mode: "supersede" }, ctx);

@@ -325,7 +325,7 @@ const KIND = {
   duplicate: { label: "Remove a duplicate", plural: "Remove duplicates", blurb: "One entry repeats another. Archive the copy, or keep both." },
   merge: { label: "Merge repeated entries", plural: "Merge repeated entries", blurb: "The same lesson was saved several times. Pick the one to keep; the rest will point to it." },
   repair: { label: "Fix broken entries", plural: "Fix broken entries", blurb: "Entries saved with text in the wrong field or no tags, so searches miss them." },
-  link: { label: "Link related entries", plural: "Link related entries", blurb: "Two entries that a reader of one should see. One click each." },
+  link: { label: "Mark an entry replaced", plural: "Mark entries replaced", blurb: "A newer entry replaces an older one; both stay readable." },
   other: { label: "Other suggestion", plural: "Other suggestions", blurb: "One-off tasks the curator cannot do itself." },
 };
 
@@ -450,20 +450,15 @@ function renderProposals() {
     if (!cards.length) continue;
     const head = el("div", { class: "section-head" },
       el("div", {}, el("h2", {}, KIND[k].plural, el("span", { class: "n" }, cards.length)), el("p", { class: "meta" }, KIND[k].blurb)));
-    if (k === "link" && cards.length > 1) {
-      const all = el("button", { class: "btn" }, `Link all ${cards.length}`);
-      all.onclick = async () => {
-        all.disabled = true;
-        let done = 0;
-        for (const c of cards) {
-          try { await api("/api/act", { action: c.buttons[0].action, params: { ...c.buttons[0].params, ids: c.action_ids } }); done++; } catch {}
-        }
-        toast(`linked ${done} of ${cards.length}`);
-        await load();
-      };
-      head.append(all);
-    }
     out.push(head, ...cards.map(decisionCard));
+  }
+  if (p.queuedLinks.length) {
+    out.push(el("details", { class: "bucket" },
+      el("summary", {}, `Links queued — applied automatically on the next curator run (${p.queuedLinks.length})`),
+      el("p", { class: "lead" }, "A link only cross-references two entries, so it needs no confirmation. Each one will appear under Recent changes, with an undo."),
+      el("ul", { class: "mini" }, ...p.queuedLinks.map((g) => el("li", {},
+        memLink(g.memory, g.key.split("|")[0]), el("span", { class: "meta" }, "↔"),
+        el("button", { class: "idref", onclick: () => openMemory(g.key.split("|")[2]) }, short(g.key.split("|")[2])))))));
   }
   out.push(bucket("Nothing to do — explanations only",
     "The curator filed these as proposals, but they only explain why it kept an entry. There is nothing to act on.", p.explain));

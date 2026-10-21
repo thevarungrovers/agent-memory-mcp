@@ -1,6 +1,6 @@
 import {
-  addRelation, archiveMemory, getCurationActions, getDb, getMemoryById, markCurated,
-  memoryStats, recordCurationAction, setState, getState, updateMemory,
+  addRelation, archiveMemory, getCurationActions, getDb, getMemoryById, getRelations, listOpenProposals,
+  markCurated, memoryStats, recordCurationAction, resolveProposals, setState, getState, updateMemory,
 } from "../db.js";
 import { literalFingerprint, memorySimilarity } from "./similarity.js";
 import type { ArchiveReason, MemoryEntry, RelationKind } from "../types.js";
@@ -289,3 +289,41 @@ export function checkTrailingInvariants(): { ok: boolean; violations: string[]; 
 }
 
 export { getCurationActions };
+
+/**
+ * Apply every link still waiting in the proposal queue.
+ *
+ * A link changes no entry's content — it only lets a reader of one find the other — so
+ * it never needs a human's sign-off (the operator's call, 2026-10-21). A live run
+ * applies RELATE itself; the ones left waiting were recorded by the dry runs before
+ * the curator went live, or by a dry run since. Each is re-recorded as an applied
+ * action of this run, so it shows in the report and in the dashboard's recent changes
+ * with an undo, and the original proposal is marked answered.
+ */
+export function settleLinkProposals(runId: string): { linked: number; skipped: number } {
+  let linked = 0;
+  let skipped = 0;
+  const seen = new Set<string>();
+  for (const p of listOpenProposals()) {
+    if (p.verdict !== "RELATE" || !p.cites) continue;
+    const a = getMemoryById(p.memory_id);
+    const b = getMemoryById(p.cites);
+    const key = `${p.memory_id}|${p.cites}`;
+    getDb().transaction(() => {
+      if (!a || !b || a.archived_at || b.archived_at) {
+        resolveProposals([p.id], "dismissed", "an entry it would link is archived or gone");
+        skipped++;
+        return;
+      }
+      const exists = getRelations(a.id).some((r) => r.from_id === b.id || r.to_id === b.id);
+      if (!exists && !seen.has(key)) {
+        addRelation(a.id, b.id, "refines", (p.rationale ?? "").slice(0, 200), "curator");
+        recordCurationAction({ run_id: runId, memory_id: a.id, verdict: "RELATE", tier: "applied", cites: b.id, rationale: p.rationale });
+        linked++;
+      }
+      seen.add(key);
+      resolveProposals([p.id], "applied", "links are applied without confirmation");
+    })();
+  }
+  return { linked, skipped };
+}

@@ -133,6 +133,8 @@ export interface DecisionQueue {
   sections: Record<DecisionKind, DecisionCard[]>;
   /** Notes that ask for nothing: the curator explaining a KEEP under the PROPOSE label. */
   explain: QuietGroup[];
+  /** Links waiting for the next curator run, which applies them without asking. */
+  queuedLinks: QuietGroup[];
   obsolete: QuietGroup[];
   dryrun: QuietGroup[];
   total: number;
@@ -335,6 +337,7 @@ function buildMergeCards(rows: OpenRow[]): { cards: DecisionCard[]; loners: Open
 export function buildDecisions(): DecisionQueue {
   const sections: Record<DecisionKind, DecisionCard[]> = { duplicate: [], merge: [], repair: [], link: [], other: [] };
   const explain: OpenRow[] = [];
+  const queuedLinks: OpenRow[] = [];
   const obsolete: OpenRow[] = [];
   const dryrun: OpenRow[] = [];
   const merges: OpenRow[] = [];
@@ -360,7 +363,10 @@ export function buildDecisions(): DecisionQueue {
     } else if (r.verdict === "ARCHIVE") {
       const k = `${r.memory_id}|${r.cites ?? ""}`;
       archives.set(k, [...(archives.get(k) ?? []), r]);
-    } else if (r.verdict === "RELATE" || r.verdict === "SUPERSEDE") {
+    } else if (r.verdict === "RELATE") {
+      // Not a decision: the next live run applies it (settleLinkProposals).
+      queuedLinks.push(r);
+    } else if (r.verdict === "SUPERSEDE") {
       const k = `${r.memory_id}|${r.cites}|${r.verdict}`;
       links.set(k, [...(links.get(k) ?? []), r]);
     } else if (REPAIR.test(text)) {
@@ -474,7 +480,7 @@ export function buildDecisions(): DecisionQueue {
   }
 
   const total = Object.values(sections).reduce((n, s) => n + s.length, 0);
-  return { sections, explain: quiet(explain), obsolete: quiet(obsolete), dryrun: quiet(dryrun), total };
+  return { sections, explain: quiet(explain), queuedLinks: quiet(queuedLinks), obsolete: quiet(obsolete), dryrun: quiet(dryrun), total };
 }
 
 export function buildAttention(canariesFile: string | null): AttentionItem[] {
