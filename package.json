@@ -19,8 +19,10 @@
     "test:curation": "tsx tests/curation.test.ts",
     "test:surface": "node tests/mcp-surface.test.mjs",
     "test:flow": "tsx tests/curate-flow.test.ts",
-    "test": "npm run test:curation && npm run test:surface && npm run test:flow && npm run test:backfill",
-    "test:backfill": "tsx tests/backfill.test.ts"
+    "test": "npm run test:curation && npm run test:surface && npm run test:flow && npm run test:backfill && npm run test:dashboard",
+    "test:backfill": "tsx tests/backfill.test.ts",
+    "test:dashboard": "tsx tests/dashboard.test.ts",
+    "dashboard": "node dist/cli.js dashboard"
   },
   "keywords": [
     "mcp",

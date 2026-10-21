@@ -439,6 +439,43 @@ pass still exits 0 and still reports `ok`, so the only thing distinguishing it f
 working installation is the scorecard reading `0 changed, N to review`. If the corpus
 never changes, check there first.
 
+### The dashboard
+
+```sh
+npm run dashboard            # or: node dist/cli.js dashboard [--port 4777] [--no-open]
+```
+
+One local page over the curator's ledger, so you never have to read the reports to act
+on them. Each night writes its own report, and a question the curator could not settle
+used to be re-asked in a new file every night with nowhere to answer it. The dashboard
+shows each question once, however many nights it was asked, and every item carries the
+buttons that answer it:
+
+- **Needs attention** — a set failure latch (*Resume the curator*), a run stuck in
+  `running` (*Mark it failed*), a guard claim never released, an inconsistent search
+  index (*Rebuild*), trailing-window erosion, moved canaries (*New baseline*), an archive
+  of an entry under 30 days old (*Restore* / *The archive is right*), guard refusals.
+- **Proposals** — archive in favour of the cited entry, mark superseded, link, *I handled
+  it*, or dismiss. Ids named in a rationale are clickable, and settled questions and the
+  dry-run leftovers are bucketed with a *Clear all*.
+- **Recent changes** — what the curator did on its own in the last 14 days, each with an
+  *Undo* that reverts that one change and any link it drew.
+- **Runs** — every pass with its decisions, and *Undo whole run*.
+
+Clicking an entry anywhere opens it in full, with archive / restore / supersede / link
+controls and a search to pick the other entry by title or id.
+
+Answers are stored on the ledger row (`curation_actions.resolved_at`, `resolution`).
+A proposal you dismissed is answered automatically if the curator asks the identical
+question again about a row nobody has edited since, and the nightly report counts it
+instead of re-listing it. Every write goes through `db.ts` as a session writer, never as
+the curator, so `undo --run` never reverts a decision you made by hand.
+
+It binds to 127.0.0.1 only, and every API call needs a token minted at start-up and
+embedded in the page it serves, so another website open in the same browser cannot drive
+it. Like the scheduled job, it refuses to start when `~/.agent-memory` is a symlink to an
+unmounted drive instead of replacing it with an empty store.
+
 ### What it changed
 
 The report's first section after the red flags is **What changed**, and it is the
@@ -567,6 +604,7 @@ agent-memory curate --mode nightly [--dry-run]
 agent-memory canary [--save-baseline]
 agent-memory undo --run <id>
 agent-memory state [--get k] [--set k=v]
+agent-memory dashboard [--port 4777] [--no-open]     # review page with action buttons
 ```
 
 ## Database
