@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
 import {
   ftsIntegrityCheck, getCurationActor, getDb, getMemoryById, getRelations,
-  getState, listCurationRuns, listOpenProposals, listRecentActions, memoryStats,
+  getState, listCurationRuns, listDamagedMemories, listOpenProposals, listRecentActions, memoryStats,
 } from "../db.js";
 import { checkTrailingInvariants } from "../curation/apply.js";
 import { diffCanaries, loadBaseline, loadCanaries, runCanaries } from "../curation/canary.js";
 import { memorySimilarity } from "../curation/similarity.js";
+import { planRepair } from "./repair.js";
 import type { CurationAction, MemoryEntry } from "../types.js";
 
 /**
@@ -50,23 +51,6 @@ export interface MemoryCard {
   updated_at: string;
 }
 
-export interface ProposalGroup {
-  key: string;
-  action_ids: string[];
-  verdict: string;
-  reason: string | null;
-  rationale: string | null;
-  times: number;
-  first_seen: string;
-  last_seen: string;
-  memory: MemoryCard | null;
-  cites: MemoryCard | null;
-  similarity: number | null;
-  /** Other memory ids the rationale names — consolidation proposals list several. */
-  mentioned: MemoryCard[];
-  buttons: ButtonSpec[];
-}
-
 function card(m: MemoryEntry | null): MemoryCard | null {
   if (!m) return null;
   return {
@@ -78,25 +62,6 @@ function card(m: MemoryEntry | null): MemoryCard | null {
 /** Full ids, and the 8-hex short form the curator likes to write in prose. */
 const ID_PATTERN = /\b[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\b/g;
 
-function resolveMentioned(text: string | null, exclude: Set<string>): MemoryCard[] {
-  if (!text) return [];
-  const out = new Map<string, MemoryCard>();
-  const byPrefix = getDb().prepare("SELECT * FROM memories WHERE id LIKE ? LIMIT 2");
-  for (const token of new Set(text.match(ID_PATTERN) ?? [])) {
-    let m: MemoryEntry | null = null;
-    if (token.length === 36) {
-      m = getMemoryById(token);
-    } else {
-      // Only a prefix that names exactly one row counts; an ambiguous one is dropped
-      // rather than guessed.
-      const rows = byPrefix.all(`${token}%`) as MemoryEntry[];
-      if (rows.length === 1) m = rows[0];
-    }
-    if (m && !exclude.has(m.id)) out.set(m.id, card(m)!);
-  }
-  return [...out.values()];
-}
-
 function ackKey(key: string): string {
   return `ack:${key}`;
 }
@@ -107,97 +72,409 @@ function acked(key: string): boolean {
 
 export { ackKey };
 
-function proposalButtons(g: { verdict: string; reason: string | null; memory: MemoryCard | null; cites: MemoryCard | null }): ButtonSpec[] {
-  const b: ButtonSpec[] = [];
-  const m = g.memory;
-  const c = g.cites && !g.cites.archived_at ? g.cites : null;
+// ---- Proposals, regrouped by the job they ask of you.
+//
+// The ledger holds one row per note the curator wrote, and the first version of this
+// page showed exactly that: one card per note. On the real store that was fifty cards
+// in which ten asked for the same merge, six reported the same write bug, and a third
+// asked for nothing at all — the curator explaining why it had KEPT an entry. So the
+// notes are sorted by what they want done, notes about the same job are folded into
+// one card, and every card leads with what it wants and why it could not do it itself.
 
-  if (m && !m.archived_at) {
-    if (g.verdict === "ARCHIVE") {
-      const reason = g.reason ?? (c ? "duplicate_of" : "no_longer_relevant");
-      b.push({
-        action: "proposal.archive", label: c ? "Archive (keep the cited one)" : `Archive (${reason})`,
-        kind: "primary", params: { reason, cites: c?.id ?? null },
-      });
-    }
-    if (g.verdict === "SUPERSEDE" && c) {
-      b.push({ action: "proposal.supersede", label: "Mark superseded by cited", kind: "primary", params: { cites: c.id } });
-    }
-    if (g.verdict === "RELATE" && c) {
-      b.push({ action: "proposal.relate", label: "Link the two", kind: "primary", params: { cites: c.id, kind: "refines" } });
-    }
-    if (g.verdict !== "ARCHIVE" && c) {
-      // Offered for every other verdict, PROPOSE included: a consolidation proposal is
-      // most often answered by retiring the weaker row in favour of the cited one.
-      b.push({ action: "proposal.archive", label: "Archive in favour of cited", params: { reason: "superseded_by", cites: c.id } });
-    }
-    if (g.verdict !== "SUPERSEDE" && g.verdict !== "RELATE" && c) {
-      b.push({ action: "proposal.relate", label: "Just link them", params: { cites: c.id, kind: "refines" } });
-    }
-  }
-  b.push({ action: "proposal.done", label: "I handled it", params: {} });
-  b.push({ action: "proposal.dismiss", label: g.verdict === "ARCHIVE" ? "Keep it — dismiss" : "Dismiss", params: {} });
-  return b;
+export type DecisionKind = "duplicate" | "merge" | "repair" | "link" | "other";
+
+export interface EntryView extends MemoryCard {
+  snippet: string;
+  /** Repair cards: what is wrong with this row. */
+  problems?: string[];
+  /** Repair cards: null when the dashboard can fix it itself, else why it cannot. */
+  manual?: string | null;
+  /** Merge cards: word overlap with the suggested main entry, 0–1. */
+  overlap?: number;
+  /** Merge cards: ticked to fold by default. Low-overlap entries a note merely named are not. */
+  fold?: boolean;
 }
 
-export function buildProposals(): { open: ProposalGroup[]; obsolete: ProposalGroup[]; noop: ProposalGroup[] } {
-  const groups = new Map<string, { rows: (CurationAction & { run_started_at: string })[] }>();
-  for (const a of listOpenProposals()) {
-    const key = `${a.memory_id}|${a.verdict}|${a.cites ?? ""}`;
-    const g = groups.get(key) ?? { rows: [] };
-    g.rows.push(a);
-    groups.set(key, g);
+export interface CuratorNote {
+  date: string;
+  about: string | null;
+  text: string;
+}
+
+export interface DecisionCard {
+  key: string;
+  kind: DecisionKind;
+  /** What it wants, in one line. */
+  headline: string;
+  /** Why it is asking you instead of doing it. */
+  why: string;
+  entries: EntryView[];
+  /** Merge cards: the entry the notes most often name as the one to keep. */
+  suggested_main: string | null;
+  similarity: number | null;
+  notes: CuratorNote[];
+  action_ids: string[];
+  times: number;
+  first_seen: string;
+  last_seen: string;
+  buttons: ButtonSpec[];
+}
+
+export interface QuietGroup {
+  key: string;
+  verdict: string;
+  action_ids: string[];
+  last_seen: string;
+  memory: MemoryCard | null;
+  text: string | null;
+}
+
+export interface DecisionQueue {
+  sections: Record<DecisionKind, DecisionCard[]>;
+  /** Notes that ask for nothing: the curator explaining a KEEP under the PROPOSE label. */
+  explain: QuietGroup[];
+  obsolete: QuietGroup[];
+  dryrun: QuietGroup[];
+  total: number;
+}
+
+type OpenRow = ReturnType<typeof listOpenProposals>[number];
+
+/**
+ * Words that ask something of a reader. Deliberately narrow: "merged", "flagged" and
+ * "fold" turn up in plain description ("the merged-but-not-live family", "already
+ * flagged in its own first line") and made explanations read as requests.
+ */
+const ASKS = /\b(propos(?:e|es|ing|al)|suggest(?:s|ed|ion)?|recommend\w*|a human (?:should|must|consolidat\w*|picks?)|human should|should (?:look|be)|worth fixing|backfill|re-?raise)\b/i;
+const MERGE = /\b(consolidat\w*|merge|merging|fold(?:ing)? (?:into|the)|canonical|re-?stor(?:ed|e of)|re-?learn\w*|near-identical|same gotcha|re-record\w*|true (?:re-learned )?duplicate)\b/i;
+const REPAIR = /(swallow|markup|parameter name=|leak\w*|malformed|serializ|field-boundary|tags\s*=\s*NULL|tags NULL|lost their tags|tag list|ended up inside|write-path|write bug|writer-side|ingest defect|code example ended)/i;
+
+function snippetOf(m: MemoryEntry): string {
+  const body = (m.symptom ?? "").replace(/\s+/g, " ").trim();
+  return body.length > 220 ? `${body.slice(0, 220)}…` : body;
+}
+
+function entryView(m: MemoryEntry): EntryView {
+  return { ...card(m)!, snippet: snippetOf(m) };
+}
+
+function short(title: string, n = 70): string {
+  return title.length > n ? `${title.slice(0, n)}…` : title;
+}
+
+/** The sentence of a rationale that actually asks for something, when no `ask` was written. */
+function extractAsk(text: string): string | null {
+  const sentences = text.split(/(?<=[.;])\s+(?=[A-Z])/);
+  const hit = sentences.find((s) => ASKS.test(s));
+  return hit ? hit.trim() : null;
+}
+
+/** Ids a note names, resolved to rows; short prefixes count only when unambiguous. */
+function namedRows(text: string | null): MemoryEntry[] {
+  if (!text) return [];
+  const byPrefix = getDb().prepare("SELECT * FROM memories WHERE id LIKE ? LIMIT 2");
+  const out = new Map<string, MemoryEntry>();
+  for (const token of new Set(text.match(ID_PATTERN) ?? [])) {
+    const rows = token.length === 36
+      ? [getMemoryById(token)].filter(Boolean) as MemoryEntry[]
+      : (byPrefix.all(`${token}%`) as MemoryEntry[]);
+    if (rows.length === 1) out.set(rows[0].id, rows[0]);
   }
+  return [...out.values()];
+}
 
-  const open: ProposalGroup[] = [];
-  const obsolete: ProposalGroup[] = [];
-  const noop: ProposalGroup[] = [];
+function whyArchive(row: OpenRow, similarity: number | null): string {
+  if ((row.run_notes ?? "").startsWith("backfill")) {
+    return "It came from the one-time backlog pass, which never removes anything without you.";
+  }
+  if (row.reason === "stale" || row.reason === "no_longer_relevant") {
+    return "\"Stale\" is a judgement no check can confirm, so the curator never archives for that reason on its own.";
+  }
+  if (row.reason === "duplicate_of" && similarity !== null && similarity < 0.9) {
+    return `The two overlap ${Math.round(similarity * 100)}%. It only archives on its own above 90%, because entries that look alike often describe different situations.`;
+  }
+  return "It had used up its limit of archives for the night or the month.";
+}
 
-  for (const [key, { rows }] of groups) {
-    const latest = rows[rows.length - 1];
-    const memory = getMemoryById(latest.memory_id);
-    const cited = latest.cites ? getMemoryById(latest.cites) : null;
-    const exclude = new Set([latest.memory_id, latest.cites ?? ""]);
-    const base = {
-      key,
-      action_ids: rows.map((r) => r.id),
-      verdict: latest.verdict,
-      reason: latest.reason,
-      rationale: latest.rationale,
-      times: rows.length,
-      first_seen: rows[0].created_at,
-      last_seen: latest.created_at,
-      memory: card(memory),
-      cites: card(cited),
-      similarity: memory && cited ? Number(memorySimilarity(memory, cited).toFixed(2)) : null,
-      mentioned: resolveMentioned(latest.rationale, exclude),
+function noteOf(row: OpenRow): CuratorNote {
+  const m = getMemoryById(row.memory_id);
+  return { date: row.created_at.slice(0, 10), about: m?.title ?? null, text: row.ask ? `${row.ask}\n\n${row.rationale ?? ""}` : row.rationale ?? "" };
+}
+
+function span(rows: OpenRow[]): Pick<DecisionCard, "action_ids" | "times" | "first_seen" | "last_seen" | "notes"> {
+  const sorted = [...rows].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  // A note asked on several nights is one question; count the passes, show the latest.
+  const nights = new Set(sorted.map((r) => r.run_id));
+  const latestPerKey = new Map<string, OpenRow>();
+  for (const r of sorted) latestPerKey.set(`${r.memory_id}|${r.verdict}`, r);
+  return {
+    action_ids: sorted.map((r) => r.id),
+    times: nights.size,
+    first_seen: sorted[0].created_at,
+    last_seen: sorted[sorted.length - 1].created_at,
+    notes: [...latestPerKey.values()].map(noteOf),
+  };
+}
+
+function quiet(rows: OpenRow[]): QuietGroup[] {
+  const groups = new Map<string, OpenRow[]>();
+  for (const r of rows) {
+    const k = `${r.memory_id}|${r.verdict}|${r.cites ?? ""}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  return [...groups.entries()].map(([key, rs]) => {
+    const last = rs[rs.length - 1];
+    return {
+      key, verdict: last.verdict, action_ids: rs.map((r) => r.id), last_seen: last.created_at,
+      memory: card(getMemoryById(last.memory_id)), text: last.ask ?? last.rationale,
     };
+  });
+}
 
-    // The question no longer has an answer to give: the row is gone or already
-    // archived, or the row it would be archived in favour of has itself gone.
-    const linked = (latest.verdict === "RELATE" || latest.verdict === "SUPERSEDE") && latest.cites !== null
-      && getRelations(latest.memory_id).some((r) => r.from_id === latest.cites || r.to_id === latest.cites);
-    const gone = !memory || memory.archived_at !== null || linked
-      || (latest.verdict === "ARCHIVE" && latest.cites !== null && (!cited || cited.archived_at !== null));
-    if (gone) {
-      obsolete.push({ ...base, buttons: [{ action: "proposal.dismiss", label: "Clear", params: { note: "obsolete" } }] });
-      continue;
+/**
+ * Title-word overlap with the main entry at or above which a merge row starts ticked.
+ * Titles, not whole bodies: copies of one lesson are titled alike and differ in the
+ * war story underneath, so body overlap ranked an unrelated entry above a true copy.
+ */
+const MERGE_TICK = 0.1;
+
+const STOP = new Set(["the", "and", "for", "with", "not", "but", "from", "that", "this", "its", "are", "pass", "always", "every"]);
+function titleWords(t: string): Set<string> {
+  return new Set(t.toLowerCase().split(/[^a-z0-9_.-]+/).filter((w) => w.length >= 3 && !STOP.has(w)));
+}
+function titleSimilarity(a: string, b: string): number {
+  const x = titleWords(a), y = titleWords(b);
+  let inter = 0;
+  for (const w of x) if (y.has(w)) inter++;
+  return inter / Math.max(1, x.size + y.size - inter);
+}
+
+function buildMergeCards(rows: OpenRow[]): { cards: DecisionCard[]; loners: OpenRow[] } {
+  // Two notes are about the same merge when they name at least two of the same entries.
+  const ids = rows.map((r) => new Set([r.memory_id, ...namedRows(`${r.ask ?? ""} ${r.rationale ?? ""}`).map((m) => m.id)]));
+  const parent = rows.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      let shared = 0;
+      for (const id of ids[i]) if (ids[j].has(id)) shared++;
+      // Two shared entries, or — for a note that names nobody but itself — its own entry
+      // being part of the other note's group.
+      if (shared >= Math.min(2, ids[i].size, ids[j].size)) parent[find(i)] = find(j);
     }
-    // Dry runs before 2026-10-15 recorded every decision as a proposal under its real
-    // verdict. A live run never proposes these three: it applies them or refuses them.
-    // KEEP asks for nothing, and RETAG / NOTE cannot be replayed because the ledger
-    // never stored the tags or the note text — only the rationale.
-    if (latest.verdict === "KEEP" || latest.verdict === "RETAG" || latest.verdict === "NOTE") {
-      noop.push({ ...base, buttons: [{ action: "proposal.dismiss", label: "Clear", params: { note: "no-op" } }] });
-      continue;
+  }
+  const clusters = new Map<number, number[]>();
+  rows.forEach((_, i) => clusters.set(find(i), [...(clusters.get(find(i)) ?? []), i]));
+
+  const cards: DecisionCard[] = [];
+  const loners: OpenRow[] = [];
+  for (const members of clusters.values()) {
+    const mrows0 = members.map((i) => rows[i]);
+    const span0 = new Set(members.flatMap((i) => [...ids[i]]));
+    // A "merge" that names only its own entry has nothing to merge with on this page.
+    if (span0.size < 2) { loners.push(...mrows0); continue; }
+    cards.push(mergeCard(members));
+  }
+  return { cards, loners };
+
+  function mergeCard(members: number[]): DecisionCard {
+    const mrows = members.map((i) => rows[i]);
+    const all = new Set(members.flatMap((i) => [...ids[i]]));
+    const entries = [...all].map((id) => getMemoryById(id)).filter(Boolean) as MemoryEntry[];
+    entries.sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+    // The entry the notes put forward as the keeper: named in a sentence about keeping,
+    // canonicalising or folding into, most often. Falls back to the most-named entry.
+    const keepVotes = new Map<string, number>();
+    const anyVotes = new Map<string, number>();
+    for (const r of mrows) {
+      const text = `${r.ask ?? ""} ${r.rationale ?? ""}`;
+      for (const s of text.split(/(?<=[.;:—])\s+/)) {
+        const named = namedRows(s);
+        const keeps = /\b(canonical|keep|onto|into|under it|under|survivor|best of them|most (?:complete|current))\b/i.test(s);
+        for (const m of named) {
+          anyVotes.set(m.id, (anyVotes.get(m.id) ?? 0) + 1);
+          if (keeps && named.length <= 2) keepVotes.set(m.id, (keepVotes.get(m.id) ?? 0) + 1);
+        }
+      }
     }
-    open.push({ ...base, buttons: proposalButtons(base) });
+    const top = (votes: Map<string, number>): string | null =>
+      [...votes.entries()].filter(([id]) => entries.some((e) => e.id === id && !e.archived_at))
+        .sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    const main = top(keepVotes) ?? top(anyVotes) ?? entries.filter((e) => !e.archived_at).at(-1)?.id ?? null;
+    const mainRow = entries.find((e) => e.id === main);
+    const active = entries.filter((e) => !e.archived_at).length;
+    // A note's list of "the same gotcha" ids is not always right — one named the CI
+    // checks entry among the gh-repo copies. Overlap with the main entry is shown on
+    // each row, and only rows that clearly share its words start ticked.
+    const views: EntryView[] = entries.map((e) => {
+      const overlap = mainRow && e.id !== mainRow.id ? Number(titleSimilarity(e.title, mainRow.title).toFixed(2)) : 1;
+      return { ...entryView(e), overlap, fold: e.id !== main && !e.archived_at && overlap >= MERGE_TICK };
+    });
+    views.sort((a, b) => (a.id === main ? -1 : b.id === main ? 1 : (b.overlap ?? 0) - (a.overlap ?? 0)));
+
+    return {
+      key: `merge:${mrows[0].id}`,
+      kind: "merge" as const,
+      headline: `${active} entries teach the same lesson${mainRow ? `: “${short(mainRow.title)}”` : ""}`,
+      why: "Merging means choosing which details survive. The curator never does that on its own, and it could read only some of these in full.",
+      entries: views,
+      suggested_main: main,
+      similarity: null,
+      ...span(mrows),
+      buttons: [
+        { action: "merge.apply", label: "Keep the main one, mark the rest as replaced by it", kind: "primary", params: { mode: "supersede" } },
+        { action: "merge.apply", label: "Keep the main one, archive the rest", kind: "danger", params: { mode: "archive" }, confirm: "Archive every unticked entry in favour of the main one?" },
+        { action: "proposal.done", label: "I merged them myself" },
+        { action: "proposal.dismiss", label: "Leave them as they are" },
+      ],
+    };
+  }
+}
+
+export function buildDecisions(): DecisionQueue {
+  const sections: Record<DecisionKind, DecisionCard[]> = { duplicate: [], merge: [], repair: [], link: [], other: [] };
+  const explain: OpenRow[] = [];
+  const obsolete: OpenRow[] = [];
+  const dryrun: OpenRow[] = [];
+  const merges: OpenRow[] = [];
+  const repairs: OpenRow[] = [];
+  const archives = new Map<string, OpenRow[]>();
+  const links = new Map<string, OpenRow[]>();
+  const others = new Map<string, OpenRow[]>();
+
+  for (const r of listOpenProposals()) {
+    const memory = getMemoryById(r.memory_id);
+    const cited = r.cites ? getMemoryById(r.cites) : null;
+    const text = `${r.ask ?? ""} ${r.rationale ?? ""}`;
+    const linked = (r.verdict === "RELATE" || r.verdict === "SUPERSEDE") && r.cites !== null
+      && getRelations(r.memory_id).some((x) => x.from_id === r.cites || x.to_id === r.cites);
+
+    if (!memory || linked
+      || (r.verdict === "ARCHIVE" && (memory.archived_at !== null || (r.cites !== null && (!cited || cited.archived_at !== null))))) {
+      obsolete.push(r);
+    } else if (r.verdict === "KEEP" || r.verdict === "RETAG" || r.verdict === "NOTE") {
+      // Dry runs before 2026-10-15 recorded these as proposals. KEEP asks for nothing;
+      // RETAG and NOTE cannot be replayed because the tags and note text were never stored.
+      dryrun.push(r);
+    } else if (r.verdict === "ARCHIVE") {
+      const k = `${r.memory_id}|${r.cites ?? ""}`;
+      archives.set(k, [...(archives.get(k) ?? []), r]);
+    } else if (r.verdict === "RELATE" || r.verdict === "SUPERSEDE") {
+      const k = `${r.memory_id}|${r.cites}|${r.verdict}`;
+      links.set(k, [...(links.get(k) ?? []), r]);
+    } else if (REPAIR.test(text)) {
+      repairs.push(r);
+    } else if (MERGE.test(text) && ASKS.test(text)) {
+      merges.push(r);
+    } else if (r.ask || ASKS.test(text)) {
+      const k = r.memory_id;
+      others.set(k, [...(others.get(k) ?? []), r]);
+    } else {
+      explain.push(r);
+    }
   }
 
-  // Removals first — they are the ones with a cost if left — then most-repeated.
-  const rank = (g: ProposalGroup): number => (g.verdict === "ARCHIVE" ? 0 : g.verdict === "PROPOSE" ? 1 : 2);
-  open.sort((a, b) => rank(a) - rank(b) || b.times - a.times || a.first_seen.localeCompare(b.first_seen));
-  return { open, obsolete, noop };
+  for (const [, rows] of archives) {
+    const last = rows[rows.length - 1];
+    const m = getMemoryById(last.memory_id)!;
+    const c = last.cites ? getMemoryById(last.cites) : null;
+    const sim = c ? Number(memorySimilarity(m, c).toFixed(2)) : null;
+    sections.duplicate.push({
+      key: `dup:${last.id}`,
+      kind: "duplicate",
+      headline: c ? `Archive “${short(m.title)}” — “${short(c.title)}” already covers it` : `Archive “${short(m.title)}” (${(last.reason ?? "").replace(/_/g, " ")})`,
+      why: whyArchive(last, sim),
+      entries: [entryView(m), ...(c ? [entryView(c)] : [])],
+      suggested_main: c?.id ?? null,
+      similarity: sim,
+      ...span(rows),
+      buttons: [
+        { action: "proposal.archive", label: c ? "Archive it, keep the other" : "Archive it", kind: "primary", params: { memory_id: m.id, reason: last.reason ?? (c ? "duplicate_of" : "no_longer_relevant"), cites: c?.id ?? null } },
+        ...(c ? [{ action: "proposal.relate", label: "Keep both, link them", params: { memory_id: m.id, cites: c.id, kind: "refines" } }] : []),
+        { action: "proposal.dismiss", label: "Keep both" },
+      ],
+    });
+  }
+
+  const merged = buildMergeCards(merges);
+  sections.merge = merged.cards;
+  for (const r of merged.loners) others.set(r.memory_id, [...(others.get(r.memory_id) ?? []), r]);
+
+  const damaged = listDamagedMemories();
+  if (damaged.length || repairs.length) {
+    const rows = damaged.map((d) => {
+      const m = getMemoryById(d.id)!;
+      return { ...entryView(m), problems: d.problems, manual: planRepair(m).manual };
+    });
+    const auto = rows.filter((r) => !r.manual).length;
+    sections.repair.push({
+      key: "repair",
+      kind: "repair",
+      headline: damaged.length
+        ? `${damaged.length} ${damaged.length === 1 ? "entry was" : "entries were"} saved broken — text from one field spilled into another, or the tags were lost`
+        : "The curator reported broken entries, but none are broken any more",
+      why: "Fixing them means rewriting an entry's symptom or code, which the curator is never allowed to do. "
+        + (auto ? `${auto} can be repaired here mechanically — the spilled text is moved back into its own field, nothing is reworded, and every change can be undone. ` : "")
+        + "This list is read from the entries themselves and shrinks as they are fixed.",
+      entries: rows,
+      suggested_main: null,
+      similarity: null,
+      ...(repairs.length ? span(repairs) : { action_ids: [], times: 0, first_seen: "", last_seen: "", notes: [] }),
+      buttons: [
+        ...(auto ? [{ action: "repair.applyAll", label: `Repair all ${auto} automatically`, kind: "danger" as const,
+          confirm: `Move the spilled text back into its own field on ${auto} entries?` }] : []),
+        ...(repairs.length ? [{ action: "proposal.done", label: "Clear the curator's notes about this", params: { note: "repair list" } }] : []),
+      ],
+    });
+  }
+
+  for (const [, rows] of links) {
+    const last = rows[rows.length - 1];
+    const m = getMemoryById(last.memory_id)!;
+    const c = getMemoryById(last.cites!)!;
+    if (!c) { obsolete.push(...rows); continue; }
+    const sup = last.verdict === "SUPERSEDE";
+    sections.link.push({
+      key: `link:${last.id}`,
+      kind: "link",
+      headline: sup ? `Mark “${short(m.title)}” as replaced by “${short(c.title)}”` : `Link “${short(m.title)}” ↔ “${short(c.title)}”`,
+      why: "Suggested during a trial run, before the curator was allowed to make changes, so it was never applied.",
+      entries: [entryView(m), entryView(c)],
+      suggested_main: null,
+      similarity: Number(memorySimilarity(m, c).toFixed(2)),
+      ...span(rows),
+      buttons: [
+        sup
+          ? { action: "proposal.supersede", label: "Mark replaced", kind: "primary", params: { memory_id: m.id, cites: c.id } }
+          : { action: "proposal.relate", label: "Link them", kind: "primary", params: { memory_id: m.id, cites: c.id, kind: "refines" } },
+        { action: "proposal.dismiss", label: "Skip" },
+      ],
+    });
+  }
+
+  for (const [, rows] of others) {
+    const last = rows[rows.length - 1];
+    const m = getMemoryById(last.memory_id)!;
+    const text = last.rationale ?? "";
+    sections.other.push({
+      key: `other:${last.id}`,
+      kind: "other",
+      headline: last.ask ?? extractAsk(text) ?? short(text, 160),
+      why: "None of the curator's own actions can do this, so it is asking you.",
+      entries: [entryView(m), ...namedRows(`${last.ask ?? ""} ${text}`).filter((x) => x.id !== m.id).map(entryView)],
+      suggested_main: null,
+      similarity: null,
+      ...span(rows),
+      buttons: [
+        { action: "proposal.done", label: "Done", kind: "primary" },
+        { action: "proposal.dismiss", label: "Not worth doing" },
+      ],
+    });
+  }
+
+  const total = Object.values(sections).reduce((n, s) => n + s.length, 0);
+  return { sections, explain: quiet(explain), obsolete: quiet(obsolete), dryrun: quiet(dryrun), total };
 }
 
 export function buildAttention(canariesFile: string | null): AttentionItem[] {
@@ -398,7 +675,7 @@ export function buildMemory(id: string) {
 export function buildOverview(canariesFile: string | null) {
   const stats = memoryStats();
   const runs = listCurationRuns(1);
-  const proposals = buildProposals();
+  const proposals = buildDecisions();
   return {
     generated_at: new Date().toISOString(),
     stats,

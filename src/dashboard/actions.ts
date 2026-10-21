@@ -1,11 +1,12 @@
 import {
   addRelation, archiveMemory, curatorRelationsBetween, deleteRelation, finishCurationRun,
   getCurationAction, getCurationActions, getCurationRun, getDb, getMemoryById, getRelationById,
-  markActionUndone, rebuildFts, resolveProposals, restoreMemory, revertMemoryInRun, revertRun,
+  listDamagedMemories, markActionUndone, rebuildFts, resolveProposals, restoreMemory, revertMemoryInRun, revertRun,
   setCurationActor, setState, updateMemory,
 } from "../db.js";
 import { loadCanaries, runCanaries, saveBaseline } from "../curation/canary.js";
 import { ackKey } from "./model.js";
+import { applyRepair, planRepair } from "./repair.js";
 import type { ArchiveReason, RelationKind } from "../types.js";
 
 /**
@@ -154,6 +155,43 @@ function dispatch(action: string, p: Params, ctx: { canariesFile: string | null 
     case "proposal.dismiss": {
       const n = resolveProposals(ids(p), "dismissed", str(p, "note", false));
       return { ok: true, message: `dismissed ${n} proposal(s)` };
+    }
+
+    case "merge.apply": {
+      // Keep one entry and point every other ticked entry at it — as "replaced by"
+      // (all stay searchable) or archived. The entries to fold are chosen on the card;
+      // the curator's own warning is that some copies hold a detail the main one lacks.
+      const main = requireMemory(str(p, "main")!, "main entry");
+      if (main.archived_at) throw new Error("the main entry is archived — pick another");
+      const others = Array.isArray(p.others) ? (p.others as unknown[]).filter((x): x is string => typeof x === "string") : [];
+      if (!others.length) throw new Error("tick at least one entry to fold into the main one");
+      const mode = str(p, "mode", false) === "archive" ? "archive" : "supersede";
+      let n = 0;
+      for (const id of others) {
+        if (id === main.id) continue;
+        const m = requireMemory(id);
+        if (m.archived_at) continue;
+        if (mode === "archive") doArchive(id, "duplicate_of", main.id, "merged from dashboard");
+        else doSupersede(id, main.id);
+        n++;
+      }
+      resolveProposals(ids(p), "applied", `merged into ${main.id}`);
+      return { ok: true, message: `${n} ${n === 1 ? "entry" : "entries"} ${mode === "archive" ? "archived" : "marked replaced"} in favour of "${main.title}"` };
+    }
+
+    case "repair.apply": {
+      const plan = applyRepair(str(p, "memory_id")!);
+      return { ok: true, message: `repaired "${plan.title}": ${Object.keys(plan.changes).join(", ")}` };
+    }
+    case "repair.applyAll": {
+      let fixed = 0;
+      for (const d of listDamagedMemories()) {
+        const m = getMemoryById(d.id);
+        if (!m || planRepair(m).manual) continue;
+        applyRepair(d.id);
+        fixed++;
+      }
+      return { ok: true, message: `repaired ${fixed} ${fixed === 1 ? "entry" : "entries"}` };
     }
 
     // ---- Changes the curator already made.

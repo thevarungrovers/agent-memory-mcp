@@ -455,9 +455,25 @@ buttons that answer it:
   `running` (*Mark it failed*), a guard claim never released, an inconsistent search
   index (*Rebuild*), trailing-window erosion, moved canaries (*New baseline*), an archive
   of an entry under 30 days old (*Restore* / *The archive is right*), guard refusals.
-- **Proposals** — archive in favour of the cited entry, mark superseded, link, *I handled
-  it*, or dismiss. Ids named in a rationale are clickable, and settled questions and the
-  dry-run leftovers are bucketed with a *Clear all*.
+- **Your decisions** — the curator's proposals, grouped by the job they ask of you rather
+  listed one note at a time. Every card leads with what it wants and *why you* — why the
+  curator could not do it itself — with its full reasoning folded underneath:
+  - *Remove a duplicate* — the two entries side by side; archive, keep both, or link.
+  - *Merge repeated entries* — every note about one re-stored lesson becomes one card
+    listing the copies. Pick the entry to keep; ticked copies are marked replaced by it
+    (or archived). Copies whose titles share little with the main one start unticked,
+    because a note's list of "the same gotcha" ids is not always right.
+  - *Fix broken entries* — rows where a tool call's XML leaked into a field
+    (`…</fix>\n<root_cause>…`) and the later fields were never stored, read from the rows
+    themselves. Most can be repaired in place: *Preview fix* shows exactly what moves,
+    and *Repair* moves the spilled text back into its own field without rewording it.
+    A conflict with text already in that field is left for you. Repairs are recorded in
+    `memory_revisions` like any other edit.
+  - *Link related entries* — one click each, or *Link all*.
+  - *Other suggestions* — anything else, headed by the curator's one-line `ask`.
+
+  Notes that ask for nothing (the curator explaining a KEEP), settled questions and the
+  dry-run leftovers are collapsed underneath with a *Clear all*.
 - **Recent changes** — what the curator did on its own in the last 14 days, each with an
   *Undo* that reverts that one change and any link it drew.
 - **Runs** — every pass with its decisions, and *Undo whole run*.
@@ -465,7 +481,9 @@ buttons that answer it:
 Clicking an entry anywhere opens it in full, with archive / restore / supersede / link
 controls and a search to pick the other entry by title or id.
 
-Answers are stored on the ledger row (`curation_actions.resolved_at`, `resolution`).
+Answers are stored on the ledger row (`curation_actions.resolved_at`, `resolution`). A
+`PROPOSE` must carry an `ask` — one imperative sentence — and a note that only explains a
+kept entry must be a `KEEP`; both are in `curator/PROMPT.md`.
 A proposal you dismissed is answered automatically if the curator asks the identical
 question again about a row nobody has edited since, and the nightly report counts it
 instead of re-listing it. Every write goes through `db.ts` as a session writer, never as

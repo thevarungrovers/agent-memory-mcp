@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { getCurationActions, getCurationRun, getDb, getMemoryById, searchMemories } from "../db.js";
 import { act } from "./actions.js";
 import { buildMemory, buildOverview } from "./model.js";
+import { planRepair } from "./repair.js";
 
 /**
  * The review dashboard: one local page over the curator's ledger, with a button for
@@ -83,6 +84,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ url: string; c
       if (req.method === "GET" && mem) {
         const body = buildMemory(mem[1]);
         return body ? send(res, 200, body) : send(res, 404, { error: "no such memory" });
+      }
+
+      const rep = /^\/api\/repair\/([0-9a-f-]{36})$/.exec(url.pathname);
+      if (req.method === "GET" && rep) {
+        const m = getMemoryById(rep[1]);
+        return m ? send(res, 200, planRepair(m)) : send(res, 404, { error: "no such memory" });
       }
 
       const run = /^\/api\/run\/([0-9a-f-]{36})$/.exec(url.pathname);

@@ -116,6 +116,40 @@ input[type=text] { width: 100%; }
 .picker .results button:hover { background: var(--bg); }
 .picker .chosen { margin-top: 6px; font-size: 13px; }
 .x { float: right; }
+.section-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 28px 0 10px; flex-wrap: wrap; }
+.section-head h2 { font-size: 15px; margin: 0; }
+.section-head .n { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 8px; border-radius: 10px; background: var(--line); font-size: 12px; text-align: center; }
+.section-head .meta { margin: 2px 0 0; }
+.headline { font-size: 15.5px; line-height: 1.4; margin: 6px 0 4px; }
+.why { margin: 0 0 10px; color: var(--muted); }
+.why b { color: var(--ink); font-weight: 600; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0 0 6px; }
+.entry { padding: 8px 0; border-top: 1px solid var(--line); }
+.entry:first-child { border-top: 0; }
+.snippet { color: var(--muted); font-size: 12.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.compare .side { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.compare .k { color: var(--muted); font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.mergerow { display: grid; grid-template-columns: 58px 50px 1fr; gap: 6px; align-items: start; border-top: 1px solid var(--line); }
+.mergerow.main { background: var(--ok-soft); border-radius: 6px; }
+.mergerow .entry { border: 0; }
+.pick { font-size: 11.5px; color: var(--muted); padding-top: 10px; display: flex; gap: 4px; align-items: center; cursor: pointer; }
+details.notes { margin-top: 10px; }
+details.notes summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 560; }
+.note { margin-top: 8px; }
+.chip.kind-duplicate { background: var(--crit-soft); color: var(--crit); }
+.chip.kind-merge { background: var(--warn-soft); color: var(--warn); }
+.chip.kind-repair { background: var(--warn-soft); color: var(--warn); }
+.chip.kind-link { background: var(--info-soft); color: var(--info); }
+.chip.kind-other { background: var(--line); color: var(--ink); }
+@media (max-width: 640px) { .compare { grid-template-columns: 1fr; } .mergerow { grid-template-columns: 52px 46px 1fr; } }
+.preview .diff { margin-top: 8px; }
+.preview .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.preview pre { margin: 2px 0 0; padding: 8px; border-radius: 6px; font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
+.preview .before { background: var(--crit-soft); }
+.preview .after { background: var(--ok-soft); }
+.k { color: var(--muted); font-size: 12px; font-weight: 600; }
+@media (max-width: 640px) { .preview .cols { grid-template-columns: 1fr; } }
 .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 9px 16px; border-radius: 8px; z-index: 30; font-size: 13px; max-width: 90vw; display: none; }
 .toast.err { background: var(--crit); color: #fff; }
@@ -193,7 +227,8 @@ function actionButton(spec, extra, after) {
     clearTimeout(timer);
     b.disabled = true;
     try {
-      const r = await api("/api/act", { action: spec.action, params: { ...(spec.params || {}), ...(extra || {}) } });
+      const more = typeof extra === "function" ? extra() : extra;
+      const r = await api("/api/act", { action: spec.action, params: { ...(spec.params || {}), ...(more || {}) } });
       toast(r.message);
       if (after) await after();
       await load();
@@ -251,7 +286,7 @@ function renderChrome() {
   const p = data.proposals;
   const tabs = [
     ["attention", "Needs attention", data.attention.length, data.attention.some((a) => a.level === "critical")],
-    ["proposals", "Proposals", p.open.length, false],
+    ["proposals", "Your decisions", p.total, false],
     ["changes", "Recent changes", data.changes.filter((c) => !c.undone).length, false],
     ["runs", "Runs", data.runs.length, false],
   ];
@@ -285,34 +320,103 @@ function renderAttention() {
   ];
 }
 
-// ---------- Proposals ----------
-function memRow(label, m, fallbackId, extra) {
-  return [el("div", { class: "k" }, label), el("div", {}, memLink(m, fallbackId),
-    m ? el("span", { class: "meta", style: "display:inline-flex;margin-left:8px" },
-      `${m.area}${m.project ? " · " + m.project : ""} · ${m.type}/${m.severity}`,
-      m.archived_at ? el("span", { class: "chip archived" }, "archived") : null) : null,
-    extra || null)];
+// ---------- Your decisions ----------
+const KIND = {
+  duplicate: { label: "Remove a duplicate", plural: "Remove duplicates", blurb: "One entry repeats another. Archive the copy, or keep both." },
+  merge: { label: "Merge repeated entries", plural: "Merge repeated entries", blurb: "The same lesson was saved several times. Pick the one to keep; the rest will point to it." },
+  repair: { label: "Fix broken entries", plural: "Fix broken entries", blurb: "Entries saved with text in the wrong field or no tags, so searches miss them." },
+  link: { label: "Link related entries", plural: "Link related entries", blurb: "Two entries that a reader of one should see. One click each." },
+  other: { label: "Other suggestion", plural: "Other suggestions", blurb: "One-off tasks the curator cannot do itself." },
+};
+
+function entryLine(e, extra) {
+  return el("div", { class: "entry" },
+    el("div", {}, memLink(e), " ", el("span", { class: "meta", style: "display:inline-flex" },
+      `${day(e.created_at)} · ${e.area}${e.project ? " · " + e.project : ""}`),
+      e.archived_at ? el("span", { class: "chip archived", style: "margin-left:6px" }, "archived") : null, extra || null),
+    e.problems ? el("div", { class: "row", style: "margin-top:4px" }, ...e.problems.map((p) => el("span", { class: "chip warning" }, p))) : null,
+    e.snippet ? el("div", { class: "snippet" }, e.snippet) : null);
 }
 
-function proposalCard(g) {
-  const extra = { ids: g.action_ids, memory_id: g.memory ? g.memory.id : null };
-  return el("div", { class: "card" },
+function notesBlock(c) {
+  if (!c.notes.length) return null;
+  return el("details", { class: "notes" },
+    el("summary", {}, c.notes.length === 1 ? "The curator's reasoning" : `The curator's reasoning (${c.notes.length} notes)`),
+    ...c.notes.map((n) => el("div", { class: "note" },
+      el("div", { class: "meta" }, n.date, n.about ? ` · on “${n.about}”` : ""), withIds(n.text))));
+}
+
+function decisionCard(c) {
+  const base = { ids: c.action_ids };
+  let body = null, extra = () => base;
+
+  if (c.kind === "duplicate") {
+    body = el("div", { class: "compare" }, ...c.entries.map((e, i) => el("div", { class: "side" },
+      el("div", { class: "k" }, i === 0 ? "Would be archived" : "Would stay"), entryLine(e))));
+  } else if (c.kind === "merge") {
+    let main = c.suggested_main;
+    const ticks = new Map();
+    const rows = el("div", { class: "mergelist" });
+    const draw = () => rows.replaceChildren(...c.entries.map((e) => {
+      const isMain = e.id === main;
+      if (!ticks.has(e.id)) ticks.set(e.id, !!e.fold);
+      const radio = el("input", { type: "radio", name: c.key, checked: isMain, disabled: !!e.archived_at, title: "Keep this one",
+        onchange: () => { main = e.id; draw(); } });
+      const box = el("input", { type: "checkbox", checked: !isMain && ticks.get(e.id), disabled: isMain || !!e.archived_at, title: "Fold into the main one",
+        onchange: (ev) => ticks.set(e.id, ev.target.checked) });
+      return el("div", { class: "mergerow" + (isMain ? " main" : "") },
+        el("label", { class: "pick" }, radio, "main"), el("label", { class: "pick" }, box, "fold"),
+        entryLine(e, isMain ? el("span", { class: "chip ok", style: "margin-left:6px" }, "keep")
+          : el("span", { class: "chip" + ((e.overlap ?? 0) < 0.1 ? " warning" : ""), style: "margin-left:6px",
+              title: "Share of title words in common with the main entry" }, `${Math.round((e.overlap ?? 0) * 100)}% title match`)));
+    }));
+    draw();
+    body = el("div", {}, el("p", { class: "hint" }, "Pick the entry to keep (main). Ticked entries will point to it. Entries with little in common with the main one start unticked — a note may have named them by mistake."), rows);
+    extra = () => ({ ...base, main, others: c.entries.filter((e) => e.id !== main && ticks.get(e.id)).map((e) => e.id) });
+  } else if (c.kind === "repair") {
+    const row = (e) => {
+      const preview = el("div", { class: "preview" });
+      const tools = e.manual
+        ? [el("span", { class: "chip", title: e.manual }, "needs a hand: " + e.manual)]
+        : [el("button", { class: "btn small", onclick: () => showRepair(e.id, preview) }, "Preview fix"),
+           actionButton({ action: "repair.apply", label: "Repair", kind: "plain" }, { memory_id: e.id })];
+      return el("div", { class: "entry" },
+        el("div", {}, memLink(e), " ", el("span", { class: "meta", style: "display:inline-flex" }, day(e.created_at))),
+        el("div", { class: "row", style: "margin-top:4px" }, ...e.problems.map((p) => el("span", { class: "chip warning" }, p)), ...tools),
+        preview);
+    };
+    const auto = c.entries.filter((e) => !e.manual), manual = c.entries.filter((e) => e.manual);
+    body = el("div", {},
+      auto.length ? el("div", { class: "k", style: "margin-top:6px" }, `Can be repaired here (${auto.length})`) : null,
+      ...auto.slice(0, 5).map(row),
+      auto.length > 5 ? el("details", {}, el("summary", { class: "meta" }, `Show the other ${auto.length - 5}`), ...auto.slice(5).map(row)) : null,
+      manual.length ? el("div", { class: "k", style: "margin-top:14px" }, `Need a hand (${manual.length})`) : null,
+      ...manual.map(row));
+    if (manual.length) {
+      const ask = "Repair these agent-memory entries. Each was saved broken by the tool-call serialisation bug " +
+        "(fields spilled into each other, or tags lost). For each: get_memory, move any spilled text back into its own " +
+        "field with update_memory, and restore tags from the entry's own text. Never drop text from symptom.\n\n" +
+        manual.map((e) => `- ${e.id} — ${e.title} (${(e.problems || []).join("; ")}; ${e.manual})`).join("\n");
+      c = { ...c, extraButtons: [el("button", { class: "btn", onclick: async () => {
+        try { await navigator.clipboard.writeText(ask); toast("Copied — paste it into Claude Code"); } catch { toast("Could not copy", true); }
+      } }, `Copy a request for the ${manual.length} that need a hand`)] };
+    }
+  } else {
+    body = el("div", {}, ...c.entries.slice(0, 6).map((e) => entryLine(e)),
+      c.entries.length > 6 ? el("details", {}, el("summary", { class: "meta" }, `${c.entries.length - 6} more`), ...c.entries.slice(6).map((e) => entryLine(e))) : null);
+  }
+
+  return el("div", { class: `card decision ${c.kind}` },
     el("div", { class: "meta" },
-      el("span", { class: `chip ${g.verdict}` }, g.verdict),
-      g.reason ? el("span", {}, g.reason.replace(/_/g, " ")) : null,
-      g.times > 1 ? el("span", { class: "chip warning", title: "Proposed again on later nights" }, `asked ${g.times}×`) : null,
-      el("span", {}, g.times > 1 ? `${day(g.first_seen)} → ${day(g.last_seen)}` : day(g.last_seen)),
-    ),
-    el("div", { class: "mem" },
-      ...memRow("Entry", g.memory, g.key.split("|")[0]),
-      ...(g.cites || g.key.split("|")[2] ? memRow(g.verdict === "ARCHIVE" ? "Keep instead" : "Cites", g.cites, g.key.split("|")[2],
-        g.similarity != null ? el("span", { class: "meta", style: "display:inline-flex;margin-left:8px" }, `overlap ${g.similarity}`) : null) : []),
-      ...(g.mentioned.length ? [el("div", { class: "k" }, `Also named (${g.mentioned.length})`),
-        el("ul", { class: "named" }, ...g.mentioned.map((m) => el("li", {}, memLink(m))))] : []),
-    ),
-    g.rationale ? withIds(g.rationale) : null,
-    el("div", { class: "row" }, ...g.buttons.map((b) => actionButton(b, extra)),
-      g.memory ? el("button", { class: "btn", onclick: () => openMemory(g.memory.id) }, "Open entry…") : null),
+      el("span", { class: `chip kind-${c.kind}` }, KIND[c.kind].label),
+      c.times > 1 ? el("span", { class: "chip warning", title: "Raised again on later nights" }, `raised by ${c.times} runs`) : null,
+      c.last_seen ? el("span", {}, c.times > 1 ? `${day(c.first_seen)} → ${day(c.last_seen)}` : day(c.last_seen)) : null,
+      c.similarity != null && c.kind !== "merge" ? el("span", {}, `overlap ${Math.round(c.similarity * 100)}%`) : null),
+    el("h3", { class: "headline" }, c.headline),
+    el("p", { class: "why" }, el("b", {}, "Why you: "), c.why),
+    body,
+    notesBlock(c),
+    el("div", { class: "row" }, ...(c.extraButtons || []), ...c.buttons.map((b) => actionButton(b, extra))),
   );
 }
 
@@ -326,24 +430,76 @@ function bucket(title, explain, groups) {
     el("ul", { class: "mini" }, ...groups.map((g) => el("li", {},
       el("span", { class: `chip ${g.verdict}` }, g.verdict), memLink(g.memory, g.key.split("|")[0]),
       el("span", { class: "meta" }, day(g.last_seen)),
-      actionButton({ action: "proposal.dismiss", label: "Clear", kind: "plain", params: { note: title } }, { ids: g.action_ids })))),
+      g.text ? el("div", { class: "meta", style: "flex-basis:100%" }, g.text.length > 220 ? g.text.slice(0, 220) + "…" : g.text) : null))),
   );
 }
 
 function renderProposals() {
   const p = data.proposals;
+  const order = ["duplicate", "merge", "repair", "link", "other"];
   const out = [];
-  if (!p.open.length) {
-    out.push(el("div", { class: "empty" }, el("b", {}, "No open proposals."), "Everything the curator asked you has been answered."));
+  const counts = order.filter((k) => p.sections[k].length)
+    .map((k) => `${p.sections[k].length} × ${KIND[k].label.toLowerCase()}`);
+  if (!p.total) {
+    out.push(el("div", { class: "empty" }, el("b", {}, "Nothing to decide."), "Everything the curator asked you has been answered."));
   } else {
-    out.push(el("p", { class: "lead" },
-      "Decisions the curator would not make on its own. Every night's report re-lists what it proposed; here each question appears once, " +
-      "however many nights it was asked, and stays answered once you click."));
-    out.push(...p.open.map(proposalCard));
+    out.push(el("p", { class: "lead" }, "What the curator needs you to decide, grouped by the job. " + counts.join(" · ") + "."));
   }
-  out.push(bucket("Already settled", "The entry is archived or gone, the entry it would be archived in favour of is, or the link it proposes already exists. Nothing left to decide.", p.obsolete));
-  out.push(bucket("Dry-run leftovers", "KEEP, RETAG and NOTE decisions recorded by the dry runs before the curator went live. KEEP asks for nothing, and the tags or note text of the others were never saved, so they cannot be applied from here.", p.noop));
+  for (const k of order) {
+    const cards = p.sections[k];
+    if (!cards.length) continue;
+    const head = el("div", { class: "section-head" },
+      el("div", {}, el("h2", {}, KIND[k].plural, el("span", { class: "n" }, cards.length)), el("p", { class: "meta" }, KIND[k].blurb)));
+    if (k === "link" && cards.length > 1) {
+      const all = el("button", { class: "btn" }, `Link all ${cards.length}`);
+      all.onclick = async () => {
+        all.disabled = true;
+        let done = 0;
+        for (const c of cards) {
+          try { await api("/api/act", { action: c.buttons[0].action, params: { ...c.buttons[0].params, ids: c.action_ids } }); done++; } catch {}
+        }
+        toast(`linked ${done} of ${cards.length}`);
+        await load();
+      };
+      head.append(all);
+    }
+    out.push(head, ...cards.map(decisionCard));
+  }
+  out.push(bucket("Nothing to do — explanations only",
+    "The curator filed these as proposals, but they only explain why it kept an entry. There is nothing to act on.", p.explain));
+  out.push(bucket("Already settled", "The entry is archived or gone, or the link already exists.", p.obsolete));
+  out.push(bucket("Trial-run leftovers", "Recorded by the dry runs before the curator went live. KEEP asks for nothing; the tags or note text of RETAG and NOTE were never saved, so they cannot be applied.", p.dryrun));
   return out.filter(Boolean);
+}
+
+function memRow(label, m, fallbackId, extra) {
+  return [el("div", { class: "k" }, label), el("div", {}, memLink(m, fallbackId),
+    m ? el("span", { class: "meta", style: "display:inline-flex;margin-left:8px" },
+      `${m.area}${m.project ? " · " + m.project : ""} · ${m.type}/${m.severity}`,
+      m.archived_at ? el("span", { class: "chip archived" }, "archived") : null) : null,
+    extra || null)];
+}
+
+/** Before/after of a mechanical repair, shown inline under the entry. */
+async function showRepair(id, box) {
+  if (box.childNodes.length) { rc(box); return; }
+  rc(box, "Loading…");
+  try {
+    const plan = await api(`/api/repair/${id}`);
+    rc(box, ...Object.entries(plan.changes).map(([k, v]) => {
+      const label = k.replace("_", " ");
+      // Most repairs only cut a spilled tail off the end; show just that, not two copies
+      // of the same paragraph with the difference somewhere below the fold.
+      if (v.before && v.after && v.before.startsWith(v.after)) {
+        return el("div", { class: "diff" },
+          el("div", { class: "k" }, `${label}: unchanged except this is cut from the end`),
+          el("pre", { class: "before" }, v.before.slice(v.after.length).trim()));
+      }
+      return el("div", { class: "diff" }, el("div", { class: "k" }, v.before ? `${label}: before → after` : `${label}: recovered`),
+        v.before ? el("div", { class: "cols" }, el("pre", { class: "before" }, v.before), el("pre", { class: "after" }, v.after ?? "(empty)"))
+          : el("pre", { class: "after" }, v.after ?? "(empty)"));
+    }));
+  } catch (e) { rc(box, e.message); }
 }
 
 // ---------- Recent changes ----------
