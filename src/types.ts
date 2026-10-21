@@ -85,6 +85,8 @@ export interface CurationAction {
   resolved_at: string | null;
   resolution: ProposalResolution | null;
   resolution_note: string | null;
+  /** PROPOSE only: one imperative sentence saying what the human should do. */
+  ask: string | null;
 }
 
 /**

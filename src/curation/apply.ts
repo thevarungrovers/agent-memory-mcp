@@ -30,6 +30,8 @@ export interface Decision {
   relation_kind?: RelationKind;
   tags?: string;
   note?: string;
+  /** PROPOSE: what the human should do, in one imperative sentence. */
+  ask?: string;
   rationale: string;
 }
 
@@ -93,7 +95,7 @@ export function applyDecisions(runId: string, decisions: Decision[], opts: Apply
     for (const d of decisions) {
       recordCurationAction({
         run_id: runId, memory_id: d.memory_id, verdict: d.verdict, tier: "proposed",
-        reason: d.reason ?? null, cites: d.cites ?? null, rationale: d.rationale,
+        reason: d.reason ?? null, cites: d.cites ?? null, rationale: d.rationale, ask: d.ask ?? null,
       });
       outcome.proposed++;
       outcome.details.push({ memory_id: d.memory_id, verdict: d.verdict, tier: "proposed", detail: "dry run" });
@@ -222,7 +224,7 @@ export function applyDecisions(runId: string, decisions: Decision[], opts: Apply
 
         case "PROPOSE":
         default: {
-          recordCurationAction({ run_id: runId, memory_id: d.memory_id, verdict: d.verdict === "PROPOSE" ? "PROPOSE" : d.verdict, tier: "proposed", cites: d.cites ?? null, rationale: d.rationale });
+          recordCurationAction({ run_id: runId, memory_id: d.memory_id, verdict: d.verdict === "PROPOSE" ? "PROPOSE" : d.verdict, tier: "proposed", cites: d.cites ?? null, rationale: d.rationale, ask: d.ask ?? null });
           return note(d, "proposed", "for review");
         }
       }

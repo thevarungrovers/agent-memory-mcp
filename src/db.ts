@@ -410,6 +410,9 @@ function migrateCuration(db: Database.Database): void {
   if (!actionCols.has("resolved_at")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolved_at TEXT");
   if (!actionCols.has("resolution")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolution TEXT");
   if (!actionCols.has("resolution_note")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolution_note TEXT");
+  // The one-line request a PROPOSE makes of a human. Before it existed the request was
+  // buried somewhere in a paragraph of rationale, when it was there at all.
+  if (!actionCols.has("ask")) db.exec("ALTER TABLE curation_actions ADD COLUMN ask TEXT");
 
   migrateLocaltime(db);
   sweepStragglerTimestamps(db);
@@ -1196,6 +1199,7 @@ export function recordCurationAction(action: {
   reason?: string | null;
   cites?: string | null;
   rationale?: string | null;
+  ask?: string | null;
 }): string {
   const id = uuid();
   // The same question a human has already said no to, about a row nobody has touched
@@ -1213,9 +1217,9 @@ export function recordCurationAction(action: {
     : undefined;
   getDb()
     .prepare(
-      `INSERT INTO curation_actions (id, run_id, memory_id, verdict, tier, reason, cites, rationale,
+      `INSERT INTO curation_actions (id, run_id, memory_id, verdict, tier, reason, cites, rationale, ask,
                                      resolved_at, resolution, resolution_note)
-       VALUES (:id, :run_id, :memory_id, :verdict, :tier, :reason, :cites, :rationale,
+       VALUES (:id, :run_id, :memory_id, :verdict, :tier, :reason, :cites, :rationale, :ask,
                :resolved_at, :resolution, :resolution_note)`
     )
     .run({
@@ -1230,6 +1234,7 @@ export function recordCurationAction(action: {
       reason: action.reason ?? null,
       cites: action.cites ?? null,
       rationale: action.rationale ?? null,
+      ask: action.ask ?? null,
     });
   return id;
 }
@@ -1371,15 +1376,15 @@ export function listCurationRuns(limit = 30): CurationRun[] {
 }
 
 /** Every proposal nobody has answered yet, oldest first, across every run. */
-export function listOpenProposals(): (CurationAction & { run_mode: string; run_started_at: string })[] {
+export function listOpenProposals(): (CurationAction & { run_mode: string; run_started_at: string; run_notes: string | null })[] {
   return getDb()
     .prepare(
-      `SELECT a.*, r.mode run_mode, r.started_at run_started_at
+      `SELECT a.*, r.mode run_mode, r.started_at run_started_at, r.notes run_notes
        FROM curation_actions a JOIN curation_runs r ON r.id = a.run_id
        WHERE a.tier = 'proposed' AND a.resolved_at IS NULL
        ORDER BY a.created_at ASC`
     )
-    .all() as (CurationAction & { run_mode: string; run_started_at: string })[];
+    .all() as (CurationAction & { run_mode: string; run_started_at: string; run_notes: string | null })[];
 }
 
 /** Ledger rows of one tier written in the last `days` local days, newest first. */
@@ -1462,4 +1467,31 @@ export function curatorRelationsBetween(a: string, b: string): MemoryRelation[] 
        AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
     )
     .all(a, b, b, a) as MemoryRelation[];
+}
+
+/**
+ * Entries saved broken by the tool-call serialisation bug: a field ends with its OWN
+ * closing tag (`…</fix>\n<root_cause>…`) and the fields after it were never stored, or
+ * the tags were lost. Keyed on a field's own closing tag, never on any angle bracket —
+ * the entry that documents this bug quotes the markup in its symptom on purpose. Read
+ * from the rows themselves, so the list empties as entries are repaired.
+ */
+export function listDamagedMemories(): { id: string; title: string; problems: string[] }[] {
+  const cols = ["symptom", "root_cause", "fix", "code_example", "trigger_context"] as const;
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM memories WHERE archived_at IS NULL AND (
+         tags IS NULL OR trim(tags) = ''
+         ${cols.map((c) => `OR instr(COALESCE(${c}, ''), '</${c}>') > 0`).join("\n         ")}
+       ) ORDER BY updated_at DESC`
+    )
+    .all() as MemoryEntry[];
+  return rows.map((m) => {
+    const problems: string[] = [];
+    for (const c of cols) {
+      if ((m[c] ?? "").includes(`</${c}>`)) problems.push(`later fields spilled into ${c.replace("_", " ")}`);
+    }
+    if (!m.tags || !m.tags.trim()) problems.push("no tags");
+    return { id: m.id, title: m.title, problems };
+  });
 }
