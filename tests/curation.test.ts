@@ -238,6 +238,25 @@ process.stdout.write("\nerosion guard\n");
   setState("stats_history", null);
 }
 
+process.stdout.write("\nNOTE and SUPERSEDE actually write\n");
+{
+  // Both used to be recorded as 'applied' while updateMemory silently dropped the
+  // column, because neither was in its allowlist. The ledger said one thing and the
+  // row another, and only reading the row back could tell.
+  const { applyDecisions } = await import("../src/curation/apply.js");
+  const noted = newMemory({ title: "noted" });
+  const older = newMemory({ title: "older" });
+  const newer = newMemory({ title: "newer" });
+  const runId3 = db.startCurationRun("nightly", null, null);
+  const out = applyDecisions(runId3, [
+    { memory_id: noted, verdict: "NOTE", note: "still true on 2026-10", rationale: "x" },
+    { memory_id: older, verdict: "SUPERSEDE", cites: newer, rationale: "newer has the root cause" },
+  ]);
+  ok("both verdicts applied", out.applied === 2);
+  ok("the note landed on the row", (db.getMemoryById(noted)?.curator_note ?? "").includes("still true on 2026-10"));
+  ok("superseded_by landed on the row", db.getMemoryById(older)?.superseded_by === newer);
+}
+
 process.stdout.write("\nsnapshot\n");
 const snap = join(dir, "snap.db");
 db.snapshotTo(snap);

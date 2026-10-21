@@ -733,7 +733,13 @@ export function updateMemory(
   const fields: string[] = [];
   const params: Record<string, string | null> = { id };
 
-  const allowedFields = ["title", "type", "project", "area", "trigger_context", "symptom", "root_cause", "fix", "code_example", "tags", "severity"] as const;
+  // curator_note and superseded_by belong here too: the curator's NOTE and SUPERSEDE
+  // verdicts write them through this function, and while they were missing both were
+  // recorded in the ledger as applied while the row was left untouched.
+  const allowedFields = [
+    "title", "type", "project", "area", "trigger_context", "symptom", "root_cause", "fix",
+    "code_example", "tags", "severity", "curator_note", "superseded_by",
+  ] as const;
 
   for (const field of allowedFields) {
     if (updates[field] !== undefined) {
