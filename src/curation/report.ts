@@ -45,7 +45,12 @@ export function renderReport(opts: {
   const applied = actions.filter((a) => a.tier === "applied");
   const changed = applied.filter((a) => MUTATING.has(a.verdict));
   const kept = applied.filter((a) => !MUTATING.has(a.verdict));
-  const proposed = actions.filter((a) => a.tier === "proposed");
+  // A proposal already answered — the same question dismissed on an earlier night —
+  // is counted but not re-listed. Re-asking it every night is what made the reports
+  // impossible to act on.
+  const allProposed = actions.filter((a) => a.tier === "proposed");
+  const proposed = allProposed.filter((a) => !a.resolved_at);
+  const suppressed = allProposed.length - proposed.length;
   const refused = actions.filter((a) => a.tier === "refused");
   const archived = changed.filter((a) => a.verdict === "ARCHIVE");
   const changedRows = new Set(revisions.map((r) => r.memory_id));
@@ -142,11 +147,16 @@ export function renderReport(opts: {
     lines.push("");
   }
 
-  if (proposed.length) {
+  if (proposed.length || suppressed) {
     lines.push("## Proposals — not applied");
     lines.push("");
-    lines.push("These needed a judgement no predicate can make, so they are yours.");
+    lines.push("These needed a judgement no predicate can make, so they are yours. Answer them in");
+    lines.push("the dashboard (`agent-memory dashboard`), where each one has a button and stays answered.");
     lines.push("");
+    if (suppressed) {
+      lines.push(`${suppressed} more ${suppressed === 1 ? "was" : "were"} the same question you already dismissed, and ${suppressed === 1 ? "is" : "are"} not repeated here.`);
+      lines.push("");
+    }
     for (const p of proposed) {
       const m = getMemoryById(p.memory_id);
       const why = detailFor(p.memory_id);

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type {
-  ArchiveReason, CurationAction, CurationRun, MemoryEntry, MemoryRelation, MemoryRevision,
+  ArchiveReason, CurationAction, CurationRun, MemoryEntry, MemoryRelation, MemoryRevision, ProposalResolution,
   RelationKind, RuleEntry, SessionLogEntry,
 } from "./types.js";
 
@@ -399,6 +399,17 @@ function migrateCuration(db: Database.Database): void {
     );
     INSERT OR IGNORE INTO curation_session (id, actor, run_id, started_at) VALUES (1, NULL, NULL, NULL);
   `);
+
+  // A proposal is a question put to a human, and until these columns existed there was
+  // no way to answer one: it lived only in that night's markdown report, so the same
+  // question was re-asked in a new file every night and nothing recorded that it had
+  // been dealt with. Resolved proposals drop out of the dashboard's queue.
+  const actionCols = new Set(
+    (db.prepare("PRAGMA table_info(curation_actions)").all() as { name: string }[]).map((c) => c.name)
+  );
+  if (!actionCols.has("resolved_at")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolved_at TEXT");
+  if (!actionCols.has("resolution")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolution TEXT");
+  if (!actionCols.has("resolution_note")) db.exec("ALTER TABLE curation_actions ADD COLUMN resolution_note TEXT");
 
   migrateLocaltime(db);
   sweepStragglerTimestamps(db);
@@ -1187,12 +1198,30 @@ export function recordCurationAction(action: {
   rationale?: string | null;
 }): string {
   const id = uuid();
+  // The same question a human has already said no to, about a row nobody has touched
+  // since, is answered on arrival — otherwise every dismissal is undone by the next
+  // sweep and the queue never empties.
+  const prior = action.tier === "proposed"
+    ? (getDb()
+        .prepare(
+          `SELECT a.resolved_at FROM curation_actions a JOIN memories m ON m.id = a.memory_id
+           WHERE a.memory_id = ? AND a.verdict = ? AND COALESCE(a.cites, '') = COALESCE(?, '')
+             AND a.tier = 'proposed' AND a.resolution = 'dismissed' AND m.updated_at <= a.resolved_at
+           ORDER BY a.resolved_at DESC LIMIT 1`
+        )
+        .get(action.memory_id, action.verdict, action.cites ?? null) as { resolved_at: string } | undefined)
+    : undefined;
   getDb()
     .prepare(
-      `INSERT INTO curation_actions (id, run_id, memory_id, verdict, tier, reason, cites, rationale)
-       VALUES (:id, :run_id, :memory_id, :verdict, :tier, :reason, :cites, :rationale)`
+      `INSERT INTO curation_actions (id, run_id, memory_id, verdict, tier, reason, cites, rationale,
+                                     resolved_at, resolution, resolution_note)
+       VALUES (:id, :run_id, :memory_id, :verdict, :tier, :reason, :cites, :rationale,
+               :resolved_at, :resolution, :resolution_note)`
     )
     .run({
+      resolved_at: prior ? prior.resolved_at : null,
+      resolution: prior ? "dismissed" : null,
+      resolution_note: prior ? `already dismissed on ${prior.resolved_at.slice(0, 10)}` : null,
       id,
       run_id: action.run_id,
       memory_id: action.memory_id,
@@ -1330,4 +1359,107 @@ export function revertRun(runId: string): { reverted: string[]; skipped: { id: s
   // Any row-level restore leaves the external-content index stale.
   rebuildFts();
   return { reverted, skipped };
+}
+
+// ---- Dashboard. Everything the review UI reads or writes goes through here, so it is
+// the same code path as the MCP tools and the CLI rather than a second one.
+
+export function listCurationRuns(limit = 30): CurationRun[] {
+  return getDb()
+    .prepare("SELECT * FROM curation_runs ORDER BY started_at DESC LIMIT ?")
+    .all(limit) as CurationRun[];
+}
+
+/** Every proposal nobody has answered yet, oldest first, across every run. */
+export function listOpenProposals(): (CurationAction & { run_mode: string; run_started_at: string })[] {
+  return getDb()
+    .prepare(
+      `SELECT a.*, r.mode run_mode, r.started_at run_started_at
+       FROM curation_actions a JOIN curation_runs r ON r.id = a.run_id
+       WHERE a.tier = 'proposed' AND a.resolved_at IS NULL
+       ORDER BY a.created_at ASC`
+    )
+    .all() as (CurationAction & { run_mode: string; run_started_at: string })[];
+}
+
+/** Ledger rows of one tier written in the last `days` local days, newest first. */
+export function listRecentActions(tier: CurationAction["tier"], days: number): CurationAction[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM curation_actions
+       WHERE tier = ? AND date(created_at) >= date('now', 'localtime', ?)
+       ORDER BY created_at DESC`
+    )
+    .all(tier, `-${days} days`) as CurationAction[];
+}
+
+export function getCurationAction(id: string): CurationAction | null {
+  return (getDb().prepare("SELECT * FROM curation_actions WHERE id = ?").get(id) as CurationAction | undefined) ?? null;
+}
+
+/** Answer one or more proposals. Already-answered rows are left as they were. */
+export function resolveProposals(ids: string[], resolution: ProposalResolution, note: string | null): number {
+  const stmt = getDb().prepare(
+    `UPDATE curation_actions SET resolved_at = datetime('now', 'localtime'), resolution = ?, resolution_note = ?
+     WHERE id = ? AND tier = 'proposed' AND resolved_at IS NULL`
+  );
+  let n = 0;
+  getDb().transaction(() => {
+    for (const id of ids) n += stmt.run(resolution, note, id).changes;
+  })();
+  return n;
+}
+
+export function getRelationById(id: string): MemoryRelation | null {
+  return (getDb().prepare("SELECT * FROM memory_relations WHERE id = ?").get(id) as MemoryRelation | undefined) ?? null;
+}
+
+export function deleteRelation(id: string): boolean {
+  return getDb().prepare("DELETE FROM memory_relations WHERE id = ?").run(id).changes > 0;
+}
+
+/**
+ * Undo one run's edits to ONE memory, column by column — revertRun narrowed to a row,
+ * for when a night was mostly right. Same rule as revertRun: a row a session has
+ * edited since the run is skipped rather than clobbered.
+ */
+export function revertMemoryInRun(runId: string, memoryId: string): { reverted: number; skipped: string | null } {
+  const db = getDb();
+  const run = getCurationRun(runId);
+  if (!run) throw new Error(`no such curation run: ${runId}`);
+  const current = getMemoryById(memoryId);
+  if (!current) return { reverted: 0, skipped: "row no longer exists" };
+  if (run.finished_at && current.updated_at > run.finished_at) {
+    return { reverted: 0, skipped: "edited by a session after the run" };
+  }
+  const revisions = db
+    .prepare("SELECT * FROM memory_revisions WHERE run_id = ? AND memory_id = ? ORDER BY changed_at DESC")
+    .all(runId, memoryId) as MemoryRevision[];
+  db.transaction(() => {
+    for (const rev of revisions) {
+      db.prepare(`UPDATE memories SET ${rev.column_name} = ? WHERE id = ?`).run(rev.old_value, memoryId);
+    }
+  })();
+  if (revisions.length) rebuildFts();
+  return { reverted: revisions.length, skipped: null };
+}
+
+/** Record on an applied ledger row that a human reverted it. */
+export function markActionUndone(id: string, note: string | null): void {
+  getDb()
+    .prepare(
+      `UPDATE curation_actions SET resolved_at = datetime('now', 'localtime'), resolution = 'undone', resolution_note = ?
+       WHERE id = ? AND tier = 'applied'`
+    )
+    .run(note, id);
+}
+
+/** Relations the curator itself wrote between two rows, in either direction. */
+export function curatorRelationsBetween(a: string, b: string): MemoryRelation[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM memory_relations WHERE created_by = 'curator'
+       AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
+    )
+    .all(a, b, b, a) as MemoryRelation[];
 }
