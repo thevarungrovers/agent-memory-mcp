@@ -165,6 +165,18 @@ ok("include_archived opts back in", db.listMemories({ area: "archivetest", inclu
 db.restoreMemory(c);
 ok("restore brings it back", db.listMemories({ area: "archivetest" }).some((m) => m.id === c));
 
+process.stdout.write("\nsearch_memory tags filter\n");
+const tagDocker = newMemory({ title: "tagfilter docker", tags: "docker,compose" });
+const tagOther = newMemory({ title: "tagfilter other", tags: "git,cwd" });
+const tagUnderscore = newMemory({ title: "tagfilter underscore", tags: "snake_case" });
+const tagIds = (tags: string) => db.searchMemories("tagfilter", { tags, limit: 50 }).map((m) => m.id);
+ok("a trailing comma does not widen the filter", !tagIds("docker,").includes(tagOther));
+ok("a blank piece after a comma does not widen the filter", !tagIds("docker, ").includes(tagOther));
+ok("the named tag still matches", tagIds("docker, ").includes(tagDocker));
+ok("an all-blank tags filter is no filter", tagIds(" , ").length === 3);
+ok("_ in a tag is literal, not a wildcard", tagIds("snake_case").includes(tagUnderscore) && tagIds("snakeXcase").length === 0);
+ok("% in a tag is literal, not a wildcard", tagIds("%").length === 0);
+
 process.stdout.write("\nthe UTC boundary\n");
 // created_at/updated_at are UTC. The whole job hinges on the window being computed in
 // LOCAL time: at 23:00 EDT the UTC date is already tomorrow, so a naive comparison

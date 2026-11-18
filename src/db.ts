@@ -586,11 +586,13 @@ export function searchMemories(query: string, filters?: {
     conditions.push("m.id != :exclude_id");
     params.exclude_id = filters.exclude_id;
   }
-  if (filters?.tags) {
-    const tagList = filters.tags.split(",").map(t => t.trim());
+  // A blank piece ("docker," or "docker, ") would become LIKE '%%' and, OR-ed in, match
+  // every tagged row — so drop blanks, and escape LIKE wildcards so "_" and "%" are literal.
+  const tagList = (filters?.tags ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (tagList.length > 0) {
     const tagConditions = tagList.map((tag, i) => {
-      params[`tag${i}`] = `%${tag}%`;
-      return `m.tags LIKE :tag${i}`;
+      params[`tag${i}`] = `%${tag.replace(/[\\%_]/g, "\\$&")}%`;
+      return `m.tags LIKE :tag${i} ESCAPE '\\'`;
     });
     conditions.push(`(${tagConditions.join(" OR ")})`);
   }
